@@ -1,4 +1,4 @@
-from metrics.verbmem import eval as eval_verbmem
+from metrics.verbmem import eval as eval_ve rbmem
 from metrics.privleak import eval as eval_privleak
 from metrics.knowmem import eval as eval_knowmem
 from utils import load_model, load_tokenizer, write_csv, read_json, write_json
@@ -29,6 +29,7 @@ def eval_model(
     knowmem_retain_qa_file: str | None = None,
     knowmem_retain_qa_icl_file: str | None = None,
     temp_dir: str | None = None,
+    DEBUG: bool = False,
 ) -> Dict[str, float]:
     # Argument sanity check
     if not metrics:
@@ -50,10 +51,13 @@ def eval_model(
 
     out = {}
     model = model.to('cuda')
+    debug_subset_len = 3 if DEBUG else None
      
     # 1. verbmem_f
     if 'verbmem_f' in metrics:
         data = read_json(verbmem_forget_file)
+        if DEBUG:
+            data = data[:debug_subset_len]
         agg, log = eval_verbmem(
             prompts=[d['prompt'] for d in data],
             gts=[d['gt'] for d in data],
@@ -67,10 +71,17 @@ def eval_model(
 
     # 2. privleak
     if 'privleak' in metrics:
+        forget_data = read_json(privleak_forget_file)
+        retain_data = read_json(privleak_retain_file)
+        holdout_data = read_json(privleak_holdout_file)
+        if DEBUG:
+            forget_data = forget_data[:debug_subset_len]
+            retain_data = retain_data[:debug_subset_len]
+            holdout_data = holdout_data[:debug_subset_len]
         auc, log = eval_privleak(
-            forget_data=read_json(privleak_forget_file),
-            retain_data=read_json(privleak_retain_file),
-            holdout_data=read_json(privleak_holdout_file),
+            forget_data=forget_data,
+            retain_data=retain_data,
+            holdout_data=holdout_data,
             model=model, tokenizer=tokenizer
         )
         if temp_dir is not None:
@@ -82,6 +93,9 @@ def eval_model(
     if 'knowmem_f' in metrics:
         qa = read_json(knowmem_forget_qa_file)
         icl = read_json(knowmem_forget_qa_icl_file)
+        if DEBUG:
+            qa = qa[:debug_subset_len]
+            icl = icl[:debug_subset_len]
         agg, log = eval_knowmem(
             questions=[d['question'] for d in qa],
             answers=[d['answer'] for d in qa],
@@ -99,6 +113,9 @@ def eval_model(
     if 'knowmem_r' in metrics:
         qa = read_json(knowmem_retain_qa_file)
         icl = read_json(knowmem_retain_qa_icl_file)
+        if DEBUG:
+            qa = qa[:debug_subset_len]
+            icl = icl[:debug_subset_len]
         agg, log = eval_knowmem(
             questions=[d['question'] for d in qa],
             answers=[d['answer'] for d in qa],
@@ -122,7 +139,8 @@ def load_then_eval_models(
     tokenizer_dir: str = LLAMA_DIR,
     out_file: str | None = None,
     metrics: List[str] = SUPPORTED_METRICS,
-    temp_dir: str = "temp"
+    temp_dir: str = "temp",
+    DEBUG: bool = False,
 ) -> DataFrame:
     print(out_file)
     # Argument sanity check
@@ -140,7 +158,8 @@ def load_then_eval_models(
         tokenizer = load_tokenizer(tokenizer_dir)
         res = eval_model(
             model, tokenizer, metrics, corpus,
-            temp_dir=os.path.join(temp_dir, name)
+            temp_dir=os.path.join(temp_dir, name),
+            DEBUG=DEBUG
         )
         out.append({'name': name} | res)
         if out_file is not None: write_csv(out, out_file)

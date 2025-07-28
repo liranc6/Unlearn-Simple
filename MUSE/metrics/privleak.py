@@ -11,15 +11,21 @@ from sklearn.metrics import auc as get_auc, roc_curve as get_roc_curve
 
 
 def compute_ppl(text: str, model, tokenizer, device='cuda'):
-    input_ids = torch.tensor(tokenizer.encode(text)).unsqueeze(0)
-    input_ids = input_ids.to(device)
+    # Tokenize with attention_mask and padding
+    inputs = tokenizer(
+        text,
+        return_tensors='pt',
+        add_special_tokens=True
+    )
+    input_ids = inputs['input_ids'].to(device)
+    attention_mask = inputs['attention_mask'].to(device)
     with torch.no_grad():
-        outputs = model(input_ids, labels=input_ids)
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
     loss, logits = outputs[:2]
 
     probabilities = torch.nn.functional.log_softmax(logits, dim=-1)
-    all_prob = []
     input_ids_processed = input_ids[0][1:]
+    all_prob = []
     for i, token_id in enumerate(input_ids_processed):
         probability = probabilities[0, i, token_id].item()
         all_prob.append(probability)
