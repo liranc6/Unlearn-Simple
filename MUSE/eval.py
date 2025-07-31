@@ -1,4 +1,4 @@
-from metrics.verbmem import eval as eval_ve rbmem
+from metrics.verbmem import eval as eval_verbmem
 from metrics.privleak import eval as eval_privleak
 from metrics.knowmem import eval as eval_knowmem
 from utils import load_model, load_tokenizer, write_csv, read_json, write_json
@@ -9,9 +9,24 @@ from transformers import LlamaForCausalLM, LlamaTokenizer
 from typing import List, Dict, Literal
 from pandas import DataFrame
 
+import importlib.util
+import os
+
+input_loss_landscape_utils_path = os.path.abspath(os.path.join(os.getcwd(), '..', '..', 'src', 'input_loss_landscape', 'utils.py'))
+spec = importlib.util.spec_from_file_location("input_loss_landscape_utils", input_loss_landscape_utils_path)
+input_loss_landscape_utils = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(input_loss_landscape_utils)
+
+input_loss_landscape_eval = input_loss_landscape_utils.input_loss_landscape_eval
+print(f"Current working directory: {os.getcwd()}") # Ensure the current working directory is set correctly
+
+
+
+
+
 
 def eval_model(
-    model: LlamaForCausalLM,
+    model,
     tokenizer: LlamaTokenizer = LLAMA_DIR,
     metrics: List[str] = SUPPORTED_METRICS,
     corpus: Literal['news', 'books'] | None = None,
@@ -30,13 +45,13 @@ def eval_model(
     knowmem_retain_qa_icl_file: str | None = None,
     temp_dir: str | None = None,
     DEBUG: bool = False,
-) -> Dict[str, float]:
+): # -> Dict[str, float]:
     # Argument sanity check
     if not metrics:
         raise ValueError(f"Specify `metrics` to be a non-empty list.")
     for metric in metrics:
         if metric not in SUPPORTED_METRICS:
-            raise ValueError(f"Given metric {metric} is not supported.")
+            raise ValueError(f"Given metric {metric} is not supported. supported metrics are: {SUPPORTED_METRICS=}.")
     if corpus is not None and corpus not in CORPORA:
         raise ValueError(f"Invalid corpus. `corpus` should be either 'news' or 'books'.")
     if corpus is not None:
@@ -51,7 +66,9 @@ def eval_model(
 
     out = {}
     model = model.to('cuda')
-    debug_subset_len = 3 if DEBUG else None
+    debug_subset_len = 2 if DEBUG else None
+    print(f"{DEBUG=}")
+    plots = {}
      
     # 1. verbmem_f
     if 'verbmem_f' in metrics:
@@ -78,16 +95,20 @@ def eval_model(
             forget_data = forget_data[:debug_subset_len]
             retain_data = retain_data[:debug_subset_len]
             holdout_data = holdout_data[:debug_subset_len]
-        auc, log = eval_privleak(
+            
+        privleak_output_dir = os.path.abspath(os.path.join(temp_dir, "privleak") if temp_dir is not None else None)
+        auc, log, privleak_plots = eval_privleak(
             forget_data=forget_data,
             retain_data=retain_data,
             holdout_data=holdout_data,
-            model=model, tokenizer=tokenizer
+            model=model, tokenizer=tokenizer,
+            plot_dir=privleak_output_dir
         )
         if temp_dir is not None:
             write_json(auc, os.path.join(temp_dir, "privleak/auc.json"))
             write_json(log, os.path.join(temp_dir, "privleak/log.json"))
         out['privleak'] = (auc[privleak_auc_key] - AUC_RETRAIN[corpus][privleak_auc_key]) / AUC_RETRAIN[corpus][privleak_auc_key] * 100
+        plots['privleak'] = privleak_plots
 
     # 3. knowmem_f
     if 'knowmem_f' in metrics:
@@ -129,7 +150,37 @@ def eval_model(
             write_json(log, os.path.join(temp_dir, "knowmem_r/log.json"))
         out['knowmem_r'] = agg[knowmem_agg_key] * 100
 
-    return out
+    # 5. loss_landscape
+    if 'loss_landscape' in metrics:
+        forget_data = read_json(privleak_forget_file)
+        retain_data = read_json(privleak_retain_file)
+        holdout_data = read_json(privleak_holdout_file)
+        if DEBUG:
+            forget_data = forget_data[:debug_subset_len]
+            retain_data = retain_data[:debug_subset_len]
+            holdout_data = holdout_data[:debug_subset_len]
+            
+        loss_landscape = os.path.abspath(os.path.join(temp_dir, "loss_landscape") if temp_dir is not None else None)
+        
+    return forget_data, retain_data, holdout_data, model, tokenizer, loss_landscape
+    
+    #     auc, log, loss_landscape_plots = input_loss_landscape_eval(
+    #         forget_data=forget_data,
+    #         retain_data=retain_data,
+    #         holdout_data=holdout_data,
+    #         model=model, tokenizer=tokenizer,
+    #         plot_dir=loss_landscape,
+    #         model_name='distilgpt2-finetuned-wikitext2',
+    #         create_new_file=True,
+    #     )
+    #     if temp_dir is not None:
+    #         write_json(auc, os.path.join(temp_dir, "loss_landscape/auc.json"))
+    #         write_json(log, os.path.join(temp_dir, "loss_landscape/log.json"))
+            
+    #     out['loss_landscape'] = auc
+    #     plots['loss_landscape'] = loss_landscape_plots
+
+    # return out, plots
 
 
 def load_then_eval_models(
@@ -141,7 +192,7 @@ def load_then_eval_models(
     metrics: List[str] = SUPPORTED_METRICS,
     temp_dir: str = "temp",
     DEBUG: bool = False,
-) -> DataFrame:
+): # -> DataFrame:
     print(out_file)
     # Argument sanity check
     if not model_dirs:
@@ -156,15 +207,21 @@ def load_then_eval_models(
     for model_dir, name in zip(model_dirs, names):
         model = load_model(model_dir)
         tokenizer = load_tokenizer(tokenizer_dir)
-        res = eval_model(
+        
+        return eval_model(
             model, tokenizer, metrics, corpus,
             temp_dir=os.path.join(temp_dir, name),
             DEBUG=DEBUG
         )
-        out.append({'name': name} | res)
-        if out_file is not None: write_csv(out, out_file)
-        # DataFrame(out).to_csv(out_file, index=False)
-    return DataFrame(out)
+    #     res, plots = eval_model(
+    #         model, tokenizer, metrics, corpus,
+    #         temp_dir=os.path.join(temp_dir, name),
+    #         DEBUG=DEBUG
+    #     )
+    #     out.append({'name': name} | res)
+    #     if out_file is not None: write_csv(out, out_file)
+    #     # DataFrame(out).to_csv(out_file, index=False)
+    # return DataFrame(out), plots
 
 
 if __name__ == '__main__':
