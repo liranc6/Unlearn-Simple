@@ -9,16 +9,25 @@ from transformers import LlamaForCausalLM, LlamaTokenizer
 from typing import List, Dict, Literal
 from pandas import DataFrame
 
-import importlib.util
-import os
+import sys
 
-input_loss_landscape_utils_path = os.path.abspath(os.path.join(os.getcwd(), '..', '..', 'src', 'input_loss_landscape', 'utils.py'))
-spec = importlib.util.spec_from_file_location("input_loss_landscape_utils", input_loss_landscape_utils_path)
-input_loss_landscape_utils = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(input_loss_landscape_utils)
+curr_dir = os.path.dirname(__file__)
+PROJECT_DIR = os.path.abspath(os.path.join(curr_dir, '..', '..'))
+Unlearn_Simple_DIR = os.path.join(PROJECT_DIR, 'Unlearn-Simple')
+MUSE_DIR = os.path.join(Unlearn_Simple_DIR, 'MUSE')
+
+sys.path.append(os.path.join(PROJECT_DIR, 'src'))
+
+# print sys paths that are being used for importing
+# print("Current sys.path:")
+# for path in sys.path:
+#     print(path)
+# sys.path.append(os.path.join(PROJECT_DIR, 'src'))
+import input_loss_landscape.utils as input_loss_landscape_utils
 
 input_loss_landscape_eval = input_loss_landscape_utils.input_loss_landscape_eval
-print(f"Current working directory: {os.getcwd()}") # Ensure the current working directory is set correctly
+
+input_loss_landscape_eval = input_loss_landscape_utils.input_loss_landscape_eval
 
 
 
@@ -45,6 +54,7 @@ def eval_model(
     knowmem_retain_qa_icl_file: str | None = None,
     temp_dir: str | None = None,
     DEBUG: bool = False,
+    kwargs: dict = {},
 ): # -> Dict[str, float]:
     # Argument sanity check
     if not metrics:
@@ -56,6 +66,7 @@ def eval_model(
         raise ValueError(f"Invalid corpus. `corpus` should be either 'news' or 'books'.")
     if corpus is not None:
         verbmem_forget_file = DEFAULT_DATA[corpus]['verbmem_forget_file'] if verbmem_forget_file is None else verbmem_forget_file
+        print(f"{privleak_forget_file=}, {privleak_retain_file=}, {privleak_holdout_file=}")
         privleak_forget_file = DEFAULT_DATA[corpus]['privleak_forget_file'] if privleak_forget_file is None else privleak_forget_file
         privleak_retain_file = DEFAULT_DATA[corpus]['privleak_retain_file'] if privleak_retain_file is None else privleak_retain_file
         privleak_holdout_file = DEFAULT_DATA[corpus]['privleak_holdout_file'] if privleak_holdout_file is None else privleak_holdout_file
@@ -66,13 +77,13 @@ def eval_model(
 
     out = {}
     model = model.to('cuda')
-    debug_subset_len = 2 if DEBUG else None
+    debug_subset_len = 50 if DEBUG else None
     print(f"{DEBUG=}")
     plots = {}
      
     # 1. verbmem_f
     if 'verbmem_f' in metrics:
-        data = read_json(verbmem_forget_file)
+        data = read_json(os.path.join(MUSE_DIR, verbmem_forget_file))
         if DEBUG:
             data = data[:debug_subset_len]
         agg, log = eval_verbmem(
@@ -88,32 +99,57 @@ def eval_model(
 
     # 2. privleak
     if 'privleak' in metrics:
-        forget_data = read_json(privleak_forget_file)
-        retain_data = read_json(privleak_retain_file)
-        holdout_data = read_json(privleak_holdout_file)
+        forget_data = read_json(os.path.join(MUSE_DIR, privleak_forget_file))
+        retain_data = read_json(os.path.join(MUSE_DIR, privleak_retain_file))
+        holdout_data = read_json(os.path.join(MUSE_DIR, privleak_holdout_file))
         if DEBUG:
             forget_data = forget_data[:debug_subset_len]
             retain_data = retain_data[:debug_subset_len]
             holdout_data = holdout_data[:debug_subset_len]
             
         privleak_output_dir = os.path.abspath(os.path.join(temp_dir, "privleak") if temp_dir is not None else None)
-        auc, log, privleak_plots = eval_privleak(
-            forget_data=forget_data,
-            retain_data=retain_data,
-            holdout_data=holdout_data,
-            model=model, tokenizer=tokenizer,
-            plot_dir=privleak_output_dir
-        )
-        if temp_dir is not None:
-            write_json(auc, os.path.join(temp_dir, "privleak/auc.json"))
-            write_json(log, os.path.join(temp_dir, "privleak/log.json"))
+        create_new_files = kwargs.get('create_new_files', {})
+        create_new_privleak_files = create_new_files.get('privleak', True)
+        auc_path = os.path.join(privleak_output_dir, "auc.json")
+        log_path = os.path.join(privleak_output_dir, "log.json")
+        plots_dir = os.path.join(privleak_output_dir, "plots")
+        
+        if create_new_privleak_files:
+            auc, log, privleak_plots = eval_privleak(
+                                                    forget_data=forget_data,
+                                                    retain_data=retain_data,
+                                                    holdout_data=holdout_data,
+                                                    model=model, tokenizer=tokenizer,
+                                                    plot_dir=privleak_output_dir
+                                                    )
+            if temp_dir is not None:
+                write_json(auc, auc_path)
+                write_json(log, log_path)
+                # save plots
+                os.makedirs(plots_dir, exist_ok=True)
+                for plot_name, plot_obj in privleak_plots.items():
+                    plot_path = os.path.join(plots_dir, f"{plot_name}.png")
+                    plot_obj.savefig(plot_path)
+                    plot_obj.clf()
+            
+        else:
+            # load auc, log, privleak_plots
+            auc = read_json(auc_path) if os.path.exists(auc_path) else {}
+            log = read_json(log_path) if os.path.exists(log_path) else {}
+            privleak_plots = {}
+            if os.path.isdir(plots_dir):
+                for plot_file in os.listdir(plots_dir):
+                    if plot_file.endswith(".png"):
+                        privleak_plots[os.path.splitext(plot_file)[0]] = os.path.join(plots_dir, plot_file)
+        
+                
         out['privleak'] = (auc[privleak_auc_key] - AUC_RETRAIN[corpus][privleak_auc_key]) / AUC_RETRAIN[corpus][privleak_auc_key] * 100
         plots['privleak'] = privleak_plots
 
     # 3. knowmem_f
     if 'knowmem_f' in metrics:
-        qa = read_json(knowmem_forget_qa_file)
-        icl = read_json(knowmem_forget_qa_icl_file)
+        qa = read_json(os.path.join(MUSE_DIR, knowmem_forget_qa_file))
+        icl = read_json(os.path.join(MUSE_DIR, knowmem_forget_qa_icl_file))
         if DEBUG:
             qa = qa[:debug_subset_len]
             icl = icl[:debug_subset_len]
@@ -132,8 +168,8 @@ def eval_model(
 
     # 4. knowmem_r
     if 'knowmem_r' in metrics:
-        qa = read_json(knowmem_retain_qa_file)
-        icl = read_json(knowmem_retain_qa_icl_file)
+        qa = read_json(os.path.join(MUSE_DIR, knowmem_retain_qa_file))
+        icl = read_json(os.path.join(MUSE_DIR, knowmem_retain_qa_icl_file))
         if DEBUG:
             qa = qa[:debug_subset_len]
             icl = icl[:debug_subset_len]
@@ -152,9 +188,10 @@ def eval_model(
 
     # 5. loss_landscape
     if 'loss_landscape' in metrics:
-        forget_data = read_json(privleak_forget_file)
-        retain_data = read_json(privleak_retain_file)
-        holdout_data = read_json(privleak_holdout_file)
+        print(f"{os.path.abspath(privleak_forget_file)=}")
+        forget_data = read_json(os.path.join(MUSE_DIR, privleak_forget_file))
+        retain_data = read_json(os.path.join(MUSE_DIR, privleak_retain_file))
+        holdout_data = read_json(os.path.join(MUSE_DIR, privleak_holdout_file))
         if DEBUG:
             forget_data = forget_data[:debug_subset_len]
             retain_data = retain_data[:debug_subset_len]
@@ -192,6 +229,7 @@ def load_then_eval_models(
     metrics: List[str] = SUPPORTED_METRICS,
     temp_dir: str = "temp",
     DEBUG: bool = False,
+    kwargs: dict = {},
 ): # -> DataFrame:
     print(out_file)
     # Argument sanity check
@@ -208,11 +246,28 @@ def load_then_eval_models(
         model = load_model(model_dir)
         tokenizer = load_tokenizer(tokenizer_dir)
         
-        return eval_model(
+        privleak_files = kwargs.get('privleak_files', {})
+        if privleak_files:
+            privleak_forget_file = privleak_files.get('privleak_forget_file', None)
+            privleak_retain_file = privleak_files.get('privleak_retain_file', None)
+            privleak_holdout_file = privleak_files.get('privleak_holdout_file', None)
+            
+            return eval_model(
+                            model, tokenizer, metrics, corpus,
+                            temp_dir=os.path.join(temp_dir, name),
+                            DEBUG=DEBUG,
+                            privleak_forget_file = privleak_forget_file,
+                            privleak_retain_file=privleak_retain_file,
+                            privleak_holdout_file=privleak_holdout_file,
+                            kwargs=kwargs,
+                            )
+            
+        else:
+            return eval_model(
             model, tokenizer, metrics, corpus,
             temp_dir=os.path.join(temp_dir, name),
             DEBUG=DEBUG
-        )
+            )
     #     res, plots = eval_model(
     #         model, tokenizer, metrics, corpus,
     #         temp_dir=os.path.join(temp_dir, name),
@@ -236,3 +291,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     load_then_eval_models(**vars(args))
+    

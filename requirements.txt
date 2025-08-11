@@ -1,25 +1,26 @@
-torch>=2.2
-transformers>=4.40
-datasets>=2.19
+torch
+transformers
+# datasets
 tqdm
-numpy>=1.26
-pandas>=2.2
-scikit-learn>=1.4
-scipy>=1.13
-matplotlib>=3.9
-seaborn>=0.13
-einops>=0.7
-huggingface-hub>=0.22
-tokenizers>=0.19
-# ipykernel>=6.29
-# ipython>=8.24
-ipywidgets>=8.1
-protobuf>=5.26
-python-dotenv>=1.0
-rouge-score>=0.1
-scienceplots>=2.1
-# openai>=1.23
-bitsandbytes>=0.43
+numpy
+pandas
+scikit-learn
 notebook
-accelerate>=1.9.0
-rouge-score>=0.1.2
+accelerate
+rouge-score
+seaborn
+matplotlib
+# scipy
+# matplotlib
+# einops
+# huggingface-hub
+
+# tokenizers
+# ipykernel
+# ipython>=8.24
+# ipywidgets
+# protobuf
+# python-dotenv
+# scienceplots
+# openai>=1.23
+# bitsandbytes
