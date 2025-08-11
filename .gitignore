@@ -41,3 +41,5 @@ plot/figures/
 MUSE/data/
 MUSE/simnpo_news_eval.csv
 MUSE/temp/
+
+**/*plots*/
