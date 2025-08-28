@@ -506,7 +506,9 @@ def plot_statistical_distances(stat_distances, features_labels, plots_base_dir="
                                      ha="center", va="center", color="white", fontsize=8)
     
     plt.tight_layout()
-    plt.savefig(f'{plots_base_dir}/statistical_distances_heatmap.png', bbox_inches='tight', dpi=150)
+    os.makedirs(plots_base_dir, exist_ok=True)
+    fig_path = os.path.join(plots_base_dir, 'statistical_distances_heatmap.png')
+    plt.savefig(fig_path, bbox_inches='tight', dpi=150)
     plt.show()
 
 def compare_manifold_structures(norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, plots_base_dir="loss_landscape_plots"):
