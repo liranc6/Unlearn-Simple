@@ -24,6 +24,9 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.naive_bayes import GaussianNB
 from sentence_transformers import SentenceTransformer
 import pickle
+import plotly.graph_objects as go
+import plotly.express as px
+from scipy.stats import gaussian_kde
 
 try:
     import umap
@@ -62,28 +65,70 @@ def compute_auc_dict(features_dict):
 
 def plot_landscape_results_from_features(features_dict, plot_base_dir="loss_landscape_plots"):
     """
-    Plots histograms, ROC curves, and AUC heatmaps from features_dict.
+    Plots histograms, ROC curves, and AUC heatmaps from features_dict using Plotly (interactive).
+    Adds KDE line to each histogram.
     """
+    import numpy as np
+    from sklearn.metrics import roc_curve
+    import os
     os.makedirs(plot_base_dir, exist_ok=True)
     split_names = list(features_dict.keys())
     feature_names = features_dict[split_names[0]]['features_names']
     auc_vals = compute_auc_dict(features_dict)
     plots = {}
 
-    # 1. Histograms for each feature and split
-    for feat_idx, feat in enumerate(feature_names):
-        plt.figure(figsize=(10, 6))
-        for split in split_names:
-            values = features_dict[split]['unnormalized_features_tensor'][:, feat_idx].numpy()
-            sns.histplot(values, kde=True, label=split, stat="density", element="step", fill=True)
-        plt.title(f"Histogram: {feat}")
-        plt.legend()
-        hist_path = os.path.join(plot_base_dir, f"hist_{feat.replace('/', '_')}.png")
-        plt.savefig(hist_path, bbox_inches='tight')
-        plt.close()
-        plots[f"hist_{feat.replace('/', '_')}"] = hist_path
+    # Assign colors for splits
+    split_colors = {
+        'retain': 'blue',
+        'holdout': 'green',
+        'forget': 'red'
+    }
+    # Fallback for unknown splits
+    default_colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A']
+    for idx, split in enumerate(split_names):
+        if split not in split_colors:
+            split_colors[split] = default_colors[idx % len(default_colors)]
 
-    # 2. ROC curves and collect AUCs for heatmap
+    # 1. Interactive Histograms for each feature and split, with KDE line
+    for feat_idx, feat in enumerate(feature_names):
+        fig = go.Figure()
+        for split in split_names:
+            color = split_colors.get(split, None)
+            values = features_dict[split]['unnormalized_features_tensor'][:, feat_idx].numpy()
+            fig.add_trace(go.Histogram(
+                x=values,
+                name=f"{split} histogram",
+                opacity=0.6,
+                histnorm='probability density',
+                marker_color=color
+            ))
+            # Add KDE line only if variance is nonzero
+            if np.std(values) > 0:
+                try:
+                    kde = gaussian_kde(values)
+                    x_grid = np.linspace(values.min(), values.max(), 200)
+                    y_grid = kde(x_grid)
+                    fig.add_trace(go.Scatter(
+                        x=x_grid,
+                        y=y_grid,
+                        mode='lines',
+                        name=f"{split} KDE",
+                        line=dict(width=3, color=color)
+                    ))
+                except Exception as e:
+                    print(f"KDE error for {split} {feat}: {e}")
+            else:
+                print(f"KDE skipped for {split} {feat}: data is constant.")
+
+        fig.update_layout(
+            title=f"Histogram: {feat}",
+            barmode='overlay',
+            width=900,
+            height=600
+        )
+        plots[f"hist_{feat.replace('/', '_')}"] = fig
+        
+    # 2. Interactive ROC curves and collect AUCs for heatmap
     auc_matrix = {feat: np.zeros((len(split_names), len(split_names))) for feat in feature_names}
     for i, split0 in enumerate(split_names):
         for j, split1 in enumerate(split_names):
@@ -101,56 +146,67 @@ def plot_landscape_results_from_features(features_dict, plot_base_dir="loss_land
                     y = np.concatenate([np.zeros(len(vals0)), np.ones(len(vals1))])
                     try:
                         fpr, tpr, _ = roc_curve(y, vals)
-                        plt.figure(figsize=(8, 6))
-                        plt.plot(fpr, tpr, label=f"AUC = {auc_score:.3f}")
-                        plt.plot([0, 1], [0, 1], 'k--', label="Random")
-                        plt.xlabel("False Positive Rate")
-                        plt.ylabel("True Positive Rate")
-                        plt.title(f"ROC Curve: {split0} vs {split1} - {feat}")
-                        plt.legend(loc="lower right")
-                        plt.grid(alpha=0.3)
-                        roc_path = os.path.join(plot_base_dir, f"roc_{auc_key.replace('/', '_')}.png")
-                        plt.savefig(roc_path, bbox_inches='tight')
-                        plt.close()
-                        plots[f"roc_{auc_key.replace('/', '_')}"] = roc_path
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=f"AUC = {auc_score:.3f}"))
+                        fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines', name="Random", line=dict(dash='dash')))
+                        fig.update_layout(
+                            title=f"ROC Curve: {split0} vs {split1} - {feat}",
+                            xaxis_title="False Positive Rate",
+                            yaxis_title="True Positive Rate",
+                            width=900,
+                            height=600
+                        )
+                        plots[f"roc_{auc_key.replace('/', '_')}"] = fig
                     except Exception as e:
                         print(f"Error creating ROC curve for {auc_key}: {e}")
 
-    # 3. AUC Heatmaps for each feature
+    # 3. Interactive AUC Heatmaps for each feature
     for feat in feature_names:
         try:
-            plt.figure(figsize=(8, 7))
-            sns.heatmap(auc_matrix[feat], annot=True, fmt=".3f",
-                        xticklabels=split_names, yticklabels=split_names,
-                        cmap="viridis", vmin=0.5, vmax=1.0)
-            plt.title(f"AUC Heatmap: {feat}")
-            plt.tight_layout()
-            heatmap_path = os.path.join(plot_base_dir, f"auc_heatmap_{feat.replace('/', '_')}.png")
-            plt.savefig(heatmap_path, bbox_inches='tight')
-            plt.close()
-            plots[f"auc_heatmap_{feat.replace('/', '_')}"] = heatmap_path
+            fig = px.imshow(
+                auc_matrix[feat],
+                x=split_names,
+                y=split_names,
+                color_continuous_scale="viridis",
+                zmin=0.5,
+                zmax=1.0,
+                text_auto=".3f",
+                aspect="auto"
+            )
+            fig.update_layout(
+                title=f"AUC Heatmap: {feat}",
+                width=900,
+                height=700
+            )
+            plots[f"auc_heatmap_{feat.replace('/', '_')}"] = fig
         except Exception as e:
             print(f"Error creating heatmap for {feat}: {e}")
 
     return plots
 
 def show_plots(plots: dict, plots_types=['hist', 'roc', 'auc_heatmap']):
-    import matplotlib.image as mpimg
-    if plots:
-        for plt_name, plt_obj in plots.items():
-            if not any(pt.lower() in plt_name.lower() for pt in plots_types):
-                continue
+    """
+    Display plots from a dictionary. Handles image file paths and Plotly figures.
+    """
+    for plt_name, plt_obj in plots.items():
+        if not any(pt.lower() in plt_name.lower() for pt in plots_types):
+            continue
 
-            if isinstance(plt_obj, dict):
-                show_plots(plt_obj)
-            elif isinstance(plt_obj, str) and os.path.isfile(plt_obj):
-                img = mpimg.imread(plt_obj)
-                plt.figure()
-                plt.imshow(img)
-                plt.axis('off')
-                plt.title(os.path.basename(plt_obj))
-                plt.show()
-
+        # If nested dict, recurse
+        if isinstance(plt_obj, dict):
+            show_plots(plt_obj, plots_types)
+        # If file path to image
+        elif isinstance(plt_obj, str) and os.path.isfile(plt_obj):
+            img = mpimg.imread(plt_obj)
+            plt.figure()
+            plt.imshow(img)
+            plt.axis('off')
+            plt.title(os.path.basename(plt_obj))
+            plt.show()
+        # If Plotly figure
+        elif hasattr(plt_obj, 'show'):
+            plt_obj.show()
+    
 def normalize_features(t1, t2=None, t3=None):
     """
     Normalize one or multiple feature tensors using the overall mean and standard deviation
@@ -358,6 +414,8 @@ def plot_multiclass_roc_curves(results, norm_retain_tensor, norm_holdout_tensor,
 def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, features_labels, save_dir="classification_plots"):
     binary_results = {}
     binary_feature_importance = {}
+    
+    os.makedirs(save_dir, exist_ok=True)
     
     comparisons = {
         'holdout_vs_all': {'positive': norm_holdout_tensor, 'negative': torch.cat([norm_retain_tensor, norm_forget_tensor])},

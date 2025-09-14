@@ -1,0 +1,11 @@
+Model,Benchmark,Method,Classifier,AUC,Accuracy,F1,Retain_vs_All,Forget_vs_All,Model_Family
+llama-3-8b-instruct-elm-checkpoint-8,WMDP,ELM,LogReg,0.888888888888889,0.6,0.6,0.5,0.5,LLaMA-3-8B
+llama-3-8b-instruct-elm-checkpoint-8,WMDP,ELM,Tree,0.888888888888889,0.8,0.7866666666666666,0.5,0.5,LLaMA-3-8B
+SimNPO-TOFU-forget05-Llama-2-7b-chat,TOFU,SimNPO,LogReg,0.8611111111111112,0.8,0.8,0.5,0.5,LLaMA-2-7B
+SimNPO-TOFU-forget05-Llama-2-7b-chat,TOFU,SimNPO,Tree,0.75,0.8,0.8,0.5,0.5,LLaMA-2-7B
+SimNPO-TOFU-forget10-Llama-2-7b-chat,TOFU,SimNPO,LogReg,0.6666666666666666,0.4,0.36,0.5,0.5,LLaMA-2-7B
+SimNPO-TOFU-forget10-Llama-2-7b-chat,TOFU,SimNPO,Tree,0.5555555555555557,0.4,0.36,0.5,0.5,LLaMA-2-7B
+SimNPO-MUSE-News-llama-2-7b,MUSE,SimNPO,LogReg,0.9444444444444445,0.6,0.6,0.5,0.5,LLaMA-2-7B
+SimNPO-MUSE-News-llama-2-7b,MUSE,SimNPO,Tree,0.8055555555555557,0.6,0.6,0.5,0.5,LLaMA-2-7B
+SimNPO-MUSE-Books-llama-2-7b,MUSE,SimNPO,LogReg,0.6666666666666666,0.2,0.16,0.5,0.5,LLaMA-2-7B
+SimNPO-MUSE-Books-llama-2-7b,MUSE,SimNPO,Tree,0.22222222222222224,0.0,0.0,0.5,0.5,LLaMA-2-7B

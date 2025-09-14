@@ -1,0 +1,5 @@
+Model_Family,Method,Classifier,AUC,Accuracy,F1,Retain_vs_All,Forget_vs_All
+LLaMA-2-7B,SimNPO,LogReg,0.785,0.5,0.48,0.5,0.5
+LLaMA-2-7B,SimNPO,Tree,0.583,0.45,0.44,0.5,0.5
+LLaMA-3-8B,ELM,LogReg,0.889,0.6,0.6,0.5,0.5
+LLaMA-3-8B,ELM,Tree,0.889,0.8,0.787,0.5,0.5
