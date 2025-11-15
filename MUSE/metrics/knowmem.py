@@ -11,8 +11,10 @@ def get_prefix_before_words_occur(string: str, words: List[str]) -> str:
 
 def eval(
     model, tokenizer,
-    questions: List[str], answers: List[str],
-    icl_qs: List[str] = [], icl_as: List[str] = [],
+    questions: List[str], 
+    answers: List[str],
+    icl_qs: List[str] = [], 
+    icl_as: List[str] = [],
     max_new_tokens : int = 32
 ):
     assert len(questions) == len(answers)

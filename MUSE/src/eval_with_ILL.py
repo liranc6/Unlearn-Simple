@@ -213,6 +213,8 @@ def normalize_features(t1, t2=None, t3=None):
     across all tensors. Each feature is normalized to have zero mean and unit variance.
     """
     tensors = [t for t in [t1, t2, t3] if t is not None]
+    if not tensors or any(t.numel() == 0 for t in tensors):
+        print("Warning: One or more input tensors are empty. Returning originals unchanged.")
     combined = torch.cat(tensors, dim=0)
     
     mean = combined.mean(dim=0, keepdim=True)
@@ -228,12 +230,15 @@ def normalize_features(t1, t2=None, t3=None):
 
     return normalized_t1, normalized_t2, normalized_t3
 
-def train_predictors(retain_t, holdout_t, features_labels, forget_t=None):
+def train_predictors(retain_t, holdout_t, features_labels, forget_t=None, test_size=0.15):
     """
     Train membership inference classifiers for the provided tensors.
     """
+    if retain_t.numel() == 0 or holdout_t.numel() == 0 or (forget_t is not None and forget_t.numel() == 0):
+        print("Warning: One or more tensors are empty. Skipping training.")
     results = {}
     feature_importance_results = {}
+    trained_classifiers = {}
 
     datasets = {'retain': retain_t, 'holdout': holdout_t}
     if forget_t is not None:
@@ -245,7 +250,7 @@ def train_predictors(retain_t, holdout_t, features_labels, forget_t=None):
     X = torch.cat(tensors, dim=0).numpy()
     y = torch.cat(labels, dim=0).numpy()
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
 
     # Logistic Regression
     clf_logistic = LogisticRegression(random_state=42, max_iter=300, multi_class='multinomial', solver='lbfgs')
@@ -316,7 +321,7 @@ def plot_classification_results(results, feature_importance_results, save_dir="c
         
     return plots
 
-def plot_confusion_matrices(results, norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, save_dir="classification_plots"):
+def plot_confusion_matrices(results, norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, save_dir="classification_plots", test_size=0.15):
     datasets = {'retain': norm_retain_tensor, 'holdout': norm_holdout_tensor, 'forget': norm_forget_tensor}
     tensors = [t for t in datasets.values()]
     labels = [torch.full((len(t),), i) for i, t in enumerate(datasets.values())]
@@ -324,7 +329,7 @@ def plot_confusion_matrices(results, norm_retain_tensor, norm_holdout_tensor, no
     X = torch.cat(tensors, dim=0).numpy()
     y = torch.cat(labels, dim=0).numpy()
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=42, stratify=y)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
     
     for clf_name in ['logistic', 'random_forest']:
         model = results['multi_class'][clf_name]['model']
@@ -342,7 +347,7 @@ def plot_confusion_matrices(results, norm_retain_tensor, norm_holdout_tensor, no
         print(f"\\n=== Classification Report - {clf_name.replace('_', ' ').title()} ===")
         print(classification_report(y_test, y_pred, target_names=class_names))
 
-def analyze_prediction_confidence(results, norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, save_dir="classification_plots"):
+def analyze_prediction_confidence(results, norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, save_dir="classification_plots", test_size=0.15):
     datasets = {'retain': norm_retain_tensor, 'holdout': norm_holdout_tensor, 'forget': norm_forget_tensor}
     tensors = [t for t in datasets.values()]
     labels = [torch.full((len(t),), i) for i, t in enumerate(datasets.values())]
@@ -350,7 +355,7 @@ def analyze_prediction_confidence(results, norm_retain_tensor, norm_holdout_tens
     X = torch.cat(tensors, dim=0).numpy()
     y = torch.cat(labels, dim=0).numpy()
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=42, stratify=y)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
     
     for clf_name in ['logistic', 'random_forest']:
         model = results['multi_class'][clf_name]['model']
@@ -373,7 +378,7 @@ def analyze_prediction_confidence(results, norm_retain_tensor, norm_holdout_tens
         plt.savefig(confidence_path, bbox_inches='tight', dpi=150)
         plt.show()
 
-def plot_multiclass_roc_curves(results, norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, save_dir="classification_plots"):
+def plot_multiclass_roc_curves(results, norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, save_dir="classification_plots", test_size=0.15):
     datasets = {'retain': norm_retain_tensor, 'holdout': norm_holdout_tensor, 'forget': norm_forget_tensor}
     tensors = [t for t in datasets.values()]
     labels = [torch.full((len(t),), i) for i, t in enumerate(datasets.values())]
@@ -382,7 +387,7 @@ def plot_multiclass_roc_curves(results, norm_retain_tensor, norm_holdout_tensor,
     y = torch.cat(labels, dim=0).numpy()
     
     y_bin = label_binarize(y, classes=list(range(len(class_names))))
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=42, stratify=y)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
     y_test_bin = label_binarize(y_test, classes=list(range(len(class_names))))
     
     for clf_name in ['logistic', 'random_forest']:
@@ -411,7 +416,9 @@ def plot_multiclass_roc_curves(results, norm_retain_tensor, norm_holdout_tensor,
         plt.savefig(roc_path, bbox_inches='tight', dpi=150)
         plt.show()
 
-def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, features_labels, save_dir="classification_plots"):
+def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forget_tensor, features_labels, save_dir="classification_plots", test_size=0.15):
+    if norm_retain_tensor.numel() == 0 or norm_holdout_tensor.numel() == 0 or (norm_forget_tensor is not None and norm_forget_tensor.numel() == 0):
+        print("Warning: One or more tensors are empty. Skipping training.")
     binary_results = {}
     binary_feature_importance = {}
     
@@ -425,7 +432,7 @@ def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forge
     for name, data in comparisons.items():
         X = torch.cat([data['positive'], data['negative']]).numpy()
         y = torch.cat([torch.ones(len(data['positive'])), torch.zeros(len(data['negative']))]).numpy()
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=42, stratify=y)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
         
         binary_results[name] = {}
         for clf_type, (clf_class, params) in [('logistic', (LogisticRegression, {'random_state': 42, 'max_iter': 300})), ('random_forest', (RandomForestClassifier, {'random_state': 42, 'n_estimators': 100}))]:
@@ -561,7 +568,7 @@ def plot_statistical_distances(stat_distances, features_labels, plots_base_dir="
         for i in range(len(features_labels)):
             for j in range(len(stat_distances.keys())):
                 text = axes[idx].text(j, i, f'{data_matrix[i, j]:.3f}',
-                                     ha="center", va="center", color="white", fontsize=8)
+                                    ha="center", va="center", color="white", fontsize=8)
     
     plt.tight_layout()
     os.makedirs(plots_base_dir, exist_ok=True)
@@ -612,7 +619,7 @@ def compare_manifold_structures(norm_retain_tensor, norm_holdout_tensor, norm_fo
         for label in ['retain', 'holdout', 'forget']:
             mask = np.array(labels) == label
             ax.scatter(embedding[mask, 0], embedding[mask, 1], 
-                      label=label, alpha=0.6, s=30, c=colors[label])
+                    label=label, alpha=0.6, s=30, c=colors[label])
         
         ax.set_title(f'{name} Embedding\\nDataset Separation in 2D Space', fontweight='bold')
         ax.legend()
