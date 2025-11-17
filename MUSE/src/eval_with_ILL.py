@@ -283,8 +283,11 @@ def train_predictors(retain_t, holdout_t, features_labels, forget_t=None, test_s
         'feature': features_labels,
         'importance': importance_rf / np.sum(importance_rf)
     }).sort_values('importance', ascending=False)
+    
+    trained_classifiers['logistic'] = clf_logistic
+    trained_classifiers['random_forest'] = clf_rf
 
-    return results, feature_importance_results
+    return results, feature_importance_results, trained_classifiers
 
 def plot_classification_results(results, feature_importance_results, save_dir="classification_plots"):
     os.makedirs(save_dir, exist_ok=True)
@@ -435,6 +438,7 @@ def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forge
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
         
         binary_results[name] = {}
+        trained_classifiers = {}
         for clf_type, (clf_class, params) in [('logistic', (LogisticRegression, {'random_state': 42, 'max_iter': 300})), ('random_forest', (RandomForestClassifier, {'random_state': 42, 'n_estimators': 100}))]:
             clf = clf_class(**params).fit(X_train, y_train)
             y_pred, y_proba = clf.predict(X_test), clf.predict_proba(X_test)[:, 1]
@@ -454,7 +458,9 @@ def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forge
             plt.savefig(roc_path, bbox_inches='tight', dpi=150)
             plt.show()
 
-    return binary_results, binary_feature_importance
+            trained_classifiers[clf_type] = clf
+
+    return binary_results, binary_feature_importance, trained_classifiers
 
 def create_comprehensive_summary(results, binary_results, feature_importance_results, binary_feature_importance, save_dir="classification_plots"):
     performance_data = []
