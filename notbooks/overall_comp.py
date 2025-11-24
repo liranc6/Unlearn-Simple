@@ -124,6 +124,7 @@ EXPERIMENT_NAME = f'top_k_{NEIGHBOR_DIST}_k_neighbors_{MAX_NEIGHBORS}_n_tokens_{
 RESULTS_DIR = "comprehensive_results"
 if DEBUG:
     SUBSET_SIZE = 10  # Smaller subset for debugging
+    WANDB_MODE = 'disabled'  # Disable wandb in debug mode
 RESULTS_DIR = os.path.join(Unlearn_Simple_DIR, RESULTS_DIR, f"subset_size-{SUBSET_SIZE}", TIMESTAMP)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -451,7 +452,7 @@ def chunked(iterable, batch_size):
 
 def get_output_file_name(model_name, benchmark_name, split_name, strategy, rephrased=False):
     neighbor_method = strategy.get('neighbor_method', 'token_embedding_proximity')
-    strategy_name = f"top_k_{strategy['peak_top_k']}_n_tokens_{strategy['n_tokens']}_k_neighbors_{strategy['max_neighbors']}_{neighbor_method}_MNT_{strategy['max_new_tokens']}".replace('[', '').replace(']', '').replace(',', '_').replace(' ', '')
+    strategy_name = f"top_k_{strategy['peak_top_k']}_n_tokens_{strategy['n_tokens']}_k_neighbors_{strategy['max_neighbors']}_{neighbor_method}_MPT_{strategy['max_prompt_tokens']}_MGT_{strategy['max_gen_tokens']}".replace('[', '').replace(']', '').replace(',', '_').replace(' ', '')
     model_name_without_slash = model_name.replace('/', '-')
     
     output_file = os.path.join(PROJECT_DIR, 'data', f'subset_size_{SUBSET_SIZE}')
