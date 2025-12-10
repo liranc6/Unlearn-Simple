@@ -27,7 +27,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.decomposition import PCA
 from rouge_score import rouge_scorer
+import hdbscan
+from mpl_toolkits.mplot3d import Axes3D
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import torch.nn.functional as F
 import zlib
@@ -1249,9 +1252,261 @@ def run_ill_evaluation(model_name, benchmark_name, model, tokenizer, datasets, n
                         'forget_vs_all_auc_at_1_fp': 0,
                         'holdout_vs_all_auc_at_1_fp': 0
                         }
-                
+    
+    # Perform HDBSCAN clustering and visualization
+    try:
+        print("\n🔍 Performing HDBSCAN clustering and visualization...")
+        
+        # Perform clustering with default parameters
+        clustering_results = perform_hdbscan_clustering(
+            norm_forget_tensor,
+            norm_retain_tensor,
+            norm_holdout_tensor,
+            min_cluster_size=5,
+            min_samples=3
+        )
+        
+        # Create 2D visualization
+        plot_title = f"({model_name.split('/')[-1]}, {benchmark_name}, {neighbor_method})"
+        fig_2d = plot_hdbscan_results(
+            norm_forget_tensor,
+            norm_retain_tensor,
+            norm_holdout_tensor,
+            clustering_results,
+            plot_dim='2d',
+            save_path=None,  # Can be updated to save to dm
+            title_suffix=plot_title
+        )
+        
+        # Create 3D visualization
+        fig_3d = plot_hdbscan_results(
+            norm_forget_tensor,
+            norm_retain_tensor,
+            norm_holdout_tensor,
+            clustering_results,
+            plot_dim='3d',
+            save_path=None,  # Can be updated to save to dm
+            title_suffix=plot_title
+        )
+        
+        fig_2d_filename = f"{model_name.replace('/', '_')}_{benchmark_name}_{neighbor_method}_hdbscan_2d.png"
+        fig_3d_filename = f"{model_name.replace('/', '_')}_{benchmark_name}_{neighbor_method}_hdbscan_3d.png"
+        clustering_results['figs'] = {'2d': {'name': fig_2d_filename, 'fig': fig_2d},
+                                      '3d': {'name': fig_3d_filename, 'fig': fig_3d}}
+        
+        plt.show()
+    except Exception as e:
+        print(f"⚠️ Warning: Could not perform HDBSCAN clustering: {e}")
+        import traceback
+        traceback.print_exc()
 
-    return results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers
+    return results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers, clustering_results
+
+
+def perform_hdbscan_clustering(forget_tensor, retain_tensor, holdout_tensor, min_cluster_size=5, min_samples=3):
+    """
+    Perform HDBSCAN clustering on the combined feature tensors.
+    
+    Args:
+        forget_tensor: Feature tensor for forget set
+        retain_tensor: Feature tensor for retain set  
+        holdout_tensor: Feature tensor for holdout set
+        min_cluster_size: Minimum cluster size for HDBSCAN
+        min_samples: Minimum samples for HDBSCAN
+        
+    Returns:
+        dict: Dictionary containing:
+            - 'labels': Cluster labels for all samples
+            - 'probabilities': Cluster membership probabilities
+            - 'forget_labels': Cluster labels for forget samples
+            - 'retain_labels': Cluster labels for retain samples
+            - 'holdout_labels': Cluster labels for holdout samples
+            - 'n_clusters': Number of clusters found
+            - 'n_noise': Number of noise points
+    """
+    print("\n" + "="*60)
+    print("Performing HDBSCAN Clustering")
+    print("="*60)
+    
+    # Combine all tensors
+    combined_tensor = torch.cat([forget_tensor, retain_tensor, holdout_tensor]).numpy()
+    forget_len = len(forget_tensor)
+    retain_len = len(retain_tensor)
+    holdout_len = len(holdout_tensor)
+    
+    # Perform HDBSCAN clustering
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric='euclidean'
+    )
+    
+    print(f"Running HDBSCAN with min_cluster_size={min_cluster_size}, min_samples={min_samples}...")
+    cluster_labels = clusterer.fit_predict(combined_tensor)
+    probabilities = clusterer.probabilities_
+    
+    # Split labels back to original sets
+    forget_labels = cluster_labels[:forget_len]
+    retain_labels = cluster_labels[forget_len:forget_len+retain_len]
+    holdout_labels = cluster_labels[forget_len+retain_len:]
+    
+    # Count clusters and noise
+    n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+    n_noise = list(cluster_labels).count(-1)
+    
+    print(f"\nClustering Results:")
+    print(f"  Number of clusters found: {n_clusters}")
+    print(f"  Number of noise points: {n_noise} ({100*n_noise/len(cluster_labels):.1f}%)")
+    print(f"  Forget set: {len(set(forget_labels))} unique clusters")
+    print(f"  Retain set: {len(set(retain_labels))} unique clusters")
+    print(f"  Holdout set: {len(set(holdout_labels))} unique clusters")
+    
+    return {
+        'labels': cluster_labels,
+        'probabilities': probabilities,
+        'forget_labels': forget_labels,
+        'retain_labels': retain_labels,
+        'holdout_labels': holdout_labels,
+        'n_clusters': n_clusters,
+        'n_noise': n_noise,
+        'clusterer': clusterer
+    }
+
+
+def plot_hdbscan_results(forget_tensor, retain_tensor, holdout_tensor, clustering_results, 
+                         plot_dim='2d', save_path=None, title_suffix=''):
+    """
+    Visualize HDBSCAN clustering results in 2D or 3D.
+    
+    Args:
+        forget_tensor: Feature tensor for forget set
+        retain_tensor: Feature tensor for retain set
+        holdout_tensor: Feature tensor for holdout set
+        clustering_results: Results from perform_hdbscan_clustering
+        plot_dim: '2d' or '3d' for visualization dimension
+        save_path: Path to save the plot (optional)
+        title_suffix: Additional text to add to plot title
+        
+    Returns:
+        matplotlib.figure.Figure: The created figure
+    """
+    print(f"\nCreating {plot_dim.upper()} visualization...")
+    
+    # Combine tensors and convert to numpy
+    combined_tensor = torch.cat([forget_tensor, retain_tensor, holdout_tensor]).numpy()
+    forget_len = len(forget_tensor)
+    retain_len = len(retain_tensor)
+    
+    # Determine number of components for PCA
+    n_components = 3 if plot_dim == '3d' else 2
+    
+    # Reduce dimensionality with PCA
+    pca = PCA(n_components=n_components)
+    reduced_data = pca.fit_transform(combined_tensor)
+    
+    explained_var = pca.explained_variance_ratio_
+    print(f"PCA explained variance: {explained_var}")
+    print(f"Total variance explained: {sum(explained_var):.2%}")
+    
+    # Split back into sets
+    forget_reduced = reduced_data[:forget_len]
+    retain_reduced = reduced_data[forget_len:forget_len+retain_len]
+    holdout_reduced = reduced_data[forget_len+retain_len:]
+    
+    # Get cluster labels
+    cluster_labels = clustering_results['labels']
+    forget_labels = clustering_results['forget_labels']
+    retain_labels = clustering_results['retain_labels']
+    holdout_labels = clustering_results['holdout_labels']
+    
+    # Create figure
+    if plot_dim == '3d':
+        fig = plt.figure(figsize=(15, 5))
+        
+        # Plot 1: Colored by dataset type
+        ax1 = fig.add_subplot(131, projection='3d')
+        ax1.scatter(forget_reduced[:, 0], forget_reduced[:, 1], forget_reduced[:, 2], 
+                   c='red', label='Forget', alpha=0.6, s=50)
+        ax1.scatter(retain_reduced[:, 0], retain_reduced[:, 1], retain_reduced[:, 2], 
+                   c='blue', label='Retain', alpha=0.6, s=50)
+        ax1.scatter(holdout_reduced[:, 0], holdout_reduced[:, 1], holdout_reduced[:, 2], 
+                   c='green', label='Holdout', alpha=0.6, s=50)
+        ax1.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+        ax1.set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        ax1.set_zlabel(f'PC3 ({explained_var[2]:.1%})')
+        ax1.set_title('Data Split Visualization')
+        ax1.legend()
+        
+        # Plot 2: Colored by cluster
+        ax2 = fig.add_subplot(132, projection='3d')
+        scatter = ax2.scatter(reduced_data[:, 0], reduced_data[:, 1], reduced_data[:, 2],
+                            c=cluster_labels, cmap='tab20', alpha=0.6, s=50)
+        ax2.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+        ax2.set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        ax2.set_zlabel(f'PC3 ({explained_var[2]:.1%})')
+        ax2.set_title(f'HDBSCAN Clusters ({clustering_results["n_clusters"]} clusters)')
+        plt.colorbar(scatter, ax=ax2, label='Cluster ID')
+        
+        # Plot 3: Combined view with dataset markers
+        ax3 = fig.add_subplot(133, projection='3d')
+        ax3.scatter(forget_reduced[:, 0], forget_reduced[:, 1], forget_reduced[:, 2],
+                   c=forget_labels, cmap='tab20', marker='o', alpha=0.6, s=50, label='Forget')
+        ax3.scatter(retain_reduced[:, 0], retain_reduced[:, 1], retain_reduced[:, 2],
+                   c=retain_labels, cmap='tab20', marker='^', alpha=0.6, s=50, label='Retain')
+        ax3.scatter(holdout_reduced[:, 0], holdout_reduced[:, 1], holdout_reduced[:, 2],
+                   c=holdout_labels, cmap='tab20', marker='s', alpha=0.6, s=50, label='Holdout')
+        ax3.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+        ax3.set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        ax3.set_zlabel(f'PC3 ({explained_var[2]:.1%})')
+        ax3.set_title('Clusters by Dataset Type')
+        ax3.legend()
+        
+    else:  # 2d
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # Plot 1: Colored by dataset type
+        axes[0].scatter(forget_reduced[:, 0], forget_reduced[:, 1], 
+                       c='red', label='Forget', alpha=0.6, s=50)
+        axes[0].scatter(retain_reduced[:, 0], retain_reduced[:, 1], 
+                       c='blue', label='Retain', alpha=0.6, s=50)
+        axes[0].scatter(holdout_reduced[:, 0], holdout_reduced[:, 1], 
+                       c='green', label='Holdout', alpha=0.6, s=50)
+        axes[0].set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+        axes[0].set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        axes[0].set_title('Data Split Visualization')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # Plot 2: Colored by cluster
+        scatter = axes[1].scatter(reduced_data[:, 0], reduced_data[:, 1],
+                                 c=cluster_labels, cmap='tab20', alpha=0.6, s=50)
+        axes[1].set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+        axes[1].set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        axes[1].set_title(f'HDBSCAN Clusters ({clustering_results["n_clusters"]} clusters)')
+        axes[1].grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=axes[1], label='Cluster ID')
+        
+        # Plot 3: Combined view with dataset markers
+        axes[2].scatter(forget_reduced[:, 0], forget_reduced[:, 1],
+                       c=forget_labels, cmap='tab20', marker='o', alpha=0.6, s=50, label='Forget')
+        axes[2].scatter(retain_reduced[:, 0], retain_reduced[:, 1],
+                       c=retain_labels, cmap='tab20', marker='^', alpha=0.6, s=50, label='Retain')
+        axes[2].scatter(holdout_reduced[:, 0], holdout_reduced[:, 1],
+                       c=holdout_labels, cmap='tab20', marker='s', alpha=0.6, s=50, label='Holdout')
+        axes[2].set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+        axes[2].set_ylabel(f'PC2 ({explained_var[1]:.1%})')
+        axes[2].set_title('Clusters by Dataset Type')
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.3)
+    
+    plt.suptitle(f'HDBSCAN Clustering Results {title_suffix}', fontsize=14, y=1.02)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to: {save_path}")
+    
+    return fig
 
 
 def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, rephrasing_methods=['token_embedding_proximity'], dm=None):
@@ -1362,7 +1617,7 @@ def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, reph
                 }
             try:
                 print(f"\nEvaluating with rephrasing method: {neighbor_method}")
-                results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers = run_ill_evaluation(
+                results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers, clustering_results= run_ill_evaluation(
                     model_name=model_name, 
                     benchmark_name=benchmark_name, 
                     model=model, 
@@ -1371,6 +1626,21 @@ def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, reph
                     neighbor_method=neighbor_method,
                     test_size=TEST_SIZE
                 )
+                
+                # Save clustering results if dm is provided
+                if dm is not None:
+                    clustering_filename = f"{model_name.replace('/', '_')}_{benchmark_name}_{neighbor_method}_clustering.pkl"
+                    dm.save_classifier(clustering_results['clusterer'], clustering_filename)
+                    print(f"💾 Saved HDBSCAN clustering results")
+
+                    fig_2d = clustering_results['figs']['2d']
+                    fig_3d = clustering_results['figs']['3d']
+                    dm.save_plot(fig_2d['fig'], fig_2d['name'])
+                    dm.save_plot(fig_3d['fig'], fig_3d['name'])
+                    print(f"💾 Saved HDBSCAN visualizations to:")
+                    print(f"   - {fig_2d['name']}")
+                    print(f"   - {fig_3d['name']}")
+            
 
                 # Add this: Save classifiers if dm is provided
                 if dm is not None:
@@ -1643,7 +1913,7 @@ class DataManager:
     Handles CSV, JSON, and other file formats for results storage.
     """
     
-    def __init__(self, base_dir=None, experiment_name=None, TIMESTAMP=None):
+    def __init__(self, base_dir=None, experiment_name=None, TIMESTAMP=None, save_plots=True):
         """
         Initialize the DataManager.
         
@@ -1657,6 +1927,8 @@ class DataManager:
         self.base_dir = base_dir
         os.makedirs(self.base_dir, exist_ok=True)
         
+        self.save_plots = save_plots
+
         if experiment_name is None:
             experiment_name = f"experiment_{TIMESTAMP}"
         else:
@@ -2117,7 +2389,7 @@ class DataManager:
     def save_plot(self, fig, filename):
         """Save plot if save_plots is True"""
         if self.save_plots and isinstance(fig, plt.Figure):
-                filepath = os.path.join(self.save_dir, filename)
+                filepath = os.path.join(self.results_dir, filename)
                 fig.savefig(filepath, dpi=300, bbox_inches='tight')
                 print(f"Saved plot: {filepath}")
         elif self.save_plots:
@@ -3566,13 +3838,16 @@ for result in all_results:
 # Create DataFrame
 table_df = pd.DataFrame(neighbor_methods)
 
-# Group by Neighbor_Method and average the AUCs
-table_df = table_df.groupby('Neighbor_Method').agg({
-    'Multi_Class_AUC_LogReg': 'mean',
-    'Retain_vs_All_AUC_LogReg': 'mean',
-    'Forget_vs_All_AUC_LogReg': 'mean',
-    'Holdout_vs_All_AUC_LogReg': 'mean'
-}).round(3).reset_index()
+if table_df.empty:
+    print("No data available for REMIND_OURS neighbor methods comparison.")
+else:
+    # Group by Neighbor_Method and average the AUCs
+    table_df = table_df.groupby('Neighbor_Method').agg({
+        'Multi_Class_AUC_LogReg': 'mean',
+        'Retain_vs_All_AUC_LogReg': 'mean',
+        'Forget_vs_All_AUC_LogReg': 'mean',
+        'Holdout_vs_All_AUC_LogReg': 'mean'
+    }).round(3).reset_index()
 
 # Display the table
 print("Table 5: REMIND_OURS Performance Across Neighbor Generation Methods")
@@ -3628,8 +3903,5 @@ print(rephrasing_options_table)
 wandb.finish()
 
 print("finished all tasks!")
-
-
-()
 
 
