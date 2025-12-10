@@ -58,6 +58,7 @@ parser.add_argument('--train_size', type=int, default=1000, help='Training set s
 parser.add_argument('--n_repeats', type=int, default=3, help='Number of repetitions for averaging learning curve results')
 parser.add_argument('--max_prompt_tokens', type=int, default=300, help='Maximum tokens for input prompt truncation')
 parser.add_argument('--max_gen_tokens', type=int, default=300, help='Maximum tokens to generate as output')
+parser.add_argument('--timestamp', type=str, default=None, help='Timestamp for the experiment run')
 
 args, unknown = parser.parse_known_args()
 
@@ -116,7 +117,7 @@ if DEBUG:
     TIMESTAMP = '2025-09-17_18-58'
 else:
     RESULTS_DIR = os.path.join(Unlearn_Simple_DIR, 'results', f'subset_{SUBSET_SIZE}')
-    TIMESTAMP = datetime.now().strftime('%Y-%m-%d_%H-%M')
+    TIMESTAMP = args.timestamp if args.timestamp is not None else datetime.now().strftime('%Y-%m-%d_%H-%M')
 
 EXPERIMENT_NAME = f'top_k_{NEIGHBOR_DIST}_k_neighbors_{MAX_NEIGHBORS}_n_tokens_{N_TOKENS}_MNT_{MAX_PROMPT_TOKENS}_test_size_{TEST_SIZE}_reph_{REPHRASED_ORIGINAL}'
 
