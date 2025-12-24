@@ -37,6 +37,7 @@ import zlib
 import math
 import argparse
 import time
+import pickle
 
 from tkinter import NO
 import wandb
@@ -62,6 +63,9 @@ parser.add_argument('--n_repeats', type=int, default=3, help='Number of repetiti
 parser.add_argument('--max_prompt_tokens', type=int, default=300, help='Maximum tokens for input prompt truncation')
 parser.add_argument('--max_gen_tokens', type=int, default=300, help='Maximum tokens to generate as output')
 parser.add_argument('--timestamp', type=str, default=None, help='Timestamp for the experiment run')
+parser.add_argument('--new_classifiers', type=str, default=False, help='Use new classifiers for evaluation')
+parser.add_argument('--transferability', default=True, action='store_true', help='Enable transferability experiments')
+parser.add_argument('--save_classifiers', default=True, action='store_true', help='Save trained classifiers for future use')
 
 args, unknown = parser.parse_known_args()
 
@@ -80,6 +84,9 @@ DEBUG = not args.non_debug
 TRAIN_SIZE_TEST = args.train_size_test
 TRAIN_SIZE = args.train_size
 N_REPEATS = args.n_repeats
+NEW_CLASSIFIERS = args.new_classifiers
+TRANSFERABILITY = args.transferability
+SAVE_CLASSIFIERS = args.save_classifiers
 
 # Setup directories
 curr_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
@@ -1078,7 +1085,6 @@ def compute_rouge_l_f1_auc(forget_data, retain_data, holdout_data, model, tokeni
         'holdout_vs_all_auc_at_1_fp': holdout_vs_all_auc_at_1_fp
     }
 
-
 def run_ill_evaluation(model_name, benchmark_name, model, tokenizer, datasets, neighbor_method, test_size=TEST_SIZE):
     """
     Run Input Loss Landscape (ILL) evaluation for a given model and benchmark.
@@ -1233,6 +1239,16 @@ def run_ill_evaluation(model_name, benchmark_name, model, tokenizer, datasets, n
     
     binary_results['holdout_vs_all'], classifiers = train_custom_binary_comparison( norm_holdout_tensor, torch.cat([norm_retain_tensor, norm_forget_tensor]), features_labels)
     trained_classifiers['holdout_vs_all'] = classifiers
+    
+    # Add pairwise comparisons
+    binary_results['retain_vs_forget'], classifiers = train_custom_binary_comparison(norm_retain_tensor, norm_forget_tensor, features_labels)
+    trained_classifiers['retain_vs_forget'] = classifiers
+    
+    binary_results['retain_vs_holdout'], classifiers = train_custom_binary_comparison(norm_retain_tensor, norm_holdout_tensor, features_labels)
+    trained_classifiers['retain_vs_holdout'] = classifiers
+    
+    binary_results['forget_vs_holdout'], classifiers = train_custom_binary_comparison(norm_forget_tensor, norm_holdout_tensor, features_labels)
+    trained_classifiers['forget_vs_holdout'] = classifiers
 
     # Compute LOSS-based AUCs
     if COMPUTE_BASELINES and neighbor_method == 'token_embedding_proximity': # we dont need to run it 4 times. the original loss is the same
@@ -1262,8 +1278,8 @@ def run_ill_evaluation(model_name, benchmark_name, model, tokenizer, datasets, n
             norm_forget_tensor,
             norm_retain_tensor,
             norm_holdout_tensor,
-            min_cluster_size=5,
-            min_samples=3
+            min_cluster_size=10,
+            min_samples=10
         )
         
         # Create 2D visualization
@@ -1300,10 +1316,10 @@ def run_ill_evaluation(model_name, benchmark_name, model, tokenizer, datasets, n
         import traceback
         traceback.print_exc()
 
-    return results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers, clustering_results
+    return results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers, clustering_results, features_dict
 
 
-def perform_hdbscan_clustering(forget_tensor, retain_tensor, holdout_tensor, min_cluster_size=5, min_samples=3):
+def perform_hdbscan_clustering(forget_tensor, retain_tensor, holdout_tensor, min_cluster_size=3, min_samples=3):
     """
     Perform HDBSCAN clustering on the combined feature tensors.
     
@@ -1540,14 +1556,14 @@ def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, reph
         if tokenizer_name:
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_name,
                                                     #   cache_dir=None,
-                                                      )
+                                                    )
         else:
             raise ValueError(f"Unknown tokenizer for model: {model_name}")
         
         try:    
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
-                torch_dtype=torch.float16,
+                dtype=torch.float16,
                 device_map="auto",
                 trust_remote_code=True,
                 # cache_dir=None  # Disables caching; model is loaded directly into memory
@@ -1617,7 +1633,7 @@ def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, reph
                 }
             try:
                 print(f"\nEvaluating with rephrasing method: {neighbor_method}")
-                results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers, clustering_results= run_ill_evaluation(
+                results, binary_results, feature_importance_results, binary_feature_importance, trained_classifiers, clustering_results, features_dict = run_ill_evaluation(
                     model_name=model_name, 
                     benchmark_name=benchmark_name, 
                     model=model, 
@@ -1627,10 +1643,33 @@ def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, reph
                     test_size=TEST_SIZE
                 )
                 
+                # Save features_dict if dm is provided
+                features_dict_metadata = {
+                                            'model_name': model_name,
+                                            'benchmark_name': benchmark_name,
+                                        }
+                # Ensure consistent sizes
+                forget_tensor = features_dict['forget']['unnormalized_features_tensor']
+                retain_tensor = features_dict['retain']['unnormalized_features_tensor']
+                holdout_tensor = features_dict['holdout']['unnormalized_features_tensor']
+                
+                norm_forget_tensor, norm_retain_tensor, norm_holdout_tensor = eval_with_ILL.normalize_features(forget_tensor, retain_tensor, holdout_tensor)
+                features_dict['forget']['normalized_features_tensor'] = norm_forget_tensor
+                features_dict['retain']['normalized_features_tensor'] = norm_retain_tensor
+                features_dict['holdout']['normalized_features_tensor'] = norm_holdout_tensor
+                
+                dm.save_tensors_and_metadata(features_dict, features_dict_metadata, filename_prefix="post_processed_features_dict")
+                
                 # Save clustering results if dm is provided
                 if dm is not None:
-                    clustering_filename = f"{model_name.replace('/', '_')}_{benchmark_name}_{neighbor_method}_clustering.pkl"
-                    dm.save_classifier(clustering_results['clusterer'], clustering_filename)
+                    clustering_metadata = {
+                        'model_name': model_name,
+                        'benchmark_name': benchmark_name,
+                        'neighbor_method': neighbor_method,
+                        'classifier_type': 'clustering',
+                        'clf_name': 'hdbscan'
+                    }
+                    dm.save_classifier(clustering_results['clusterer'], clustering_metadata)
                     print(f"💾 Saved HDBSCAN clustering results")
 
                     fig_2d = clustering_results['figs']['2d']
@@ -1650,12 +1689,36 @@ def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, reph
                                             'binary_comparisons', 
                                             'retain_vs_all', 
                                             'forget_vs_all', 
-                                            'holdout_vs_all'
+                                            'holdout_vs_all',
+                                            'retain_vs_forget',
+                                            'retain_vs_holdout',
+                                            'forget_vs_holdout'
                                             ]:
                         if classifier_type in trained_classifiers:
+                            if classifier_type == 'binary_comparisons':
+                                for clf_name, clf in trained_classifiers[classifier_type].items():
+                                    if isinstance(clf, dict):
+                                        for sub_clf_name, sub_clf in clf.items():
+                                            metadata = {
+                                                'model_name': model_name,
+                                                'benchmark_name': benchmark_name,
+                                                'neighbor_method': neighbor_method,
+                                                'classifier_type': classifier_type,
+                                                'clf_name': f"{clf_name}_{sub_clf_name}"
+                                            }
+                                            result = dm.save_classifier(sub_clf, metadata)
+                                            if result:
+                                                saved_count += 1
+                                continue
                             for clf_name, clf in trained_classifiers[classifier_type].items():
-                                filename = f"{model_name.replace('/', '_')}_{benchmark_name}_{neighbor_method}_{classifier_type}_{clf_name}_classifier.pkl"
-                                result = dm.save_classifier(clf, filename)
+                                metadata = {
+                                    'model_name': model_name,
+                                    'benchmark_name': benchmark_name,
+                                    'neighbor_method': neighbor_method,
+                                    'classifier_type': classifier_type,
+                                    'clf_name': clf_name
+                                }
+                                result = dm.save_classifier(clf, metadata)
                                 if result:
                                     saved_count += 1
                     print(f"✅ Successfully saved {saved_count} classifiers")
@@ -1672,6 +1735,12 @@ def evaluate_model_on_benchmark(model_name, benchmark_name, subset_size=30, reph
                         'Retain_vs_All_auc_at_1_fp': binary_results['retain_vs_all'][classifier]['auc_at_1_fp'],
                         'Forget_vs_All_auc_at_1_fp': binary_results['forget_vs_all'][classifier]['auc_at_1_fp'],
                         'Holdout_vs_All_auc_at_1_fp': binary_results['holdout_vs_all'][classifier]['auc_at_1_fp'],
+                        'Retain_vs_Forget_AUC': binary_results['retain_vs_forget'][classifier]['roc_auc'],
+                        'Retain_vs_Holdout_AUC': binary_results['retain_vs_holdout'][classifier]['roc_auc'],
+                        'Forget_vs_Holdout_AUC': binary_results['forget_vs_holdout'][classifier]['roc_auc'],
+                        'Retain_vs_Forget_auc_at_1_fp': binary_results['retain_vs_forget'][classifier]['auc_at_1_fp'],
+                        'Retain_vs_Holdout_auc_at_1_fp': binary_results['retain_vs_holdout'][classifier]['auc_at_1_fp'],
+                        'Forget_vs_Holdout_auc_at_1_fp': binary_results['forget_vs_holdout'][classifier]['auc_at_1_fp'],
                         'binary_feature_importance': binary_feature_importance,
                         'feature_importance': feature_importance_results
                     }
@@ -1936,6 +2005,7 @@ class DataManager:
 
         self.results_dir = os.path.join(base_dir, experiment_name)
         os.makedirs(self.results_dir, exist_ok=True)
+        self.classifiers = {}
         
         print(f"DataManager initialized. Results will be saved to: {self.results_dir}")
         
@@ -1950,6 +2020,22 @@ class DataManager:
         self.results_dir = os.path.join(self.base_dir, f"{experiment_name}")
         os.makedirs(self.results_dir, exist_ok=True)
         print(f"Results directory updated to: {self.results_dir}")
+        
+    def set_subdirectory(self, subdirectory_name):
+        """
+        Set a subdirectory within the results directory.
+        
+        Args:
+            subdirectory_name: Name of the subdirectory
+        """
+        subdirectory_name = subdirectory_name.strip().replace(' ', '_').replace('/', '_')
+        self.results_dir = os.path.join(self.results_dir, subdirectory_name)
+        os.makedirs(self.results_dir, exist_ok=True)
+        print(f"Results subdirectory updated to: {self.results_dir}")
+    
+    def return_one_subdir_up(self):
+        self.results_dir = os.path.dirname(self.results_dir)
+        print(f"Returned one subdirectory up. Current results directory: {self.results_dir}")
     
     def save_experiment_results(self, all_results, filename='experiment_results.json'):
         """
@@ -2041,20 +2127,22 @@ class DataManager:
         
         return saved_files
     
-    def save_intermediate_results(self, all_results, step_name='intermediate'):
+    def save_to_csv(self, all_results, prefix_name='intermediate'):
         """
         Save intermediate results during long-running experiments.
         
         Args:
             all_results: Current list of results
-            step_name: Identifier for this intermediate save
+            prefix_name: Identifier for this intermediate save
         """
-        filename = f'{step_name}_results.csv'
+        filename = f'{prefix_name}.csv'
         filepath = os.path.join(self.results_dir, filename)
         
-        # Convert to DataFrame for easy CSV saving
-        df = pd.DataFrame(all_results)
-        df.to_csv(filepath, index=False)
+        
+        if not isinstance(all_results, pd.DataFrame):
+            # Convert to DataFrame for easy CSV saving
+            all_results = pd.DataFrame(all_results)
+        all_results.to_csv(filepath, index=False)
         
         print(f"Intermediate results saved to: {filepath}")
         return filepath
@@ -2200,18 +2288,50 @@ class DataManager:
         print(f"Successfully loaded {len(all_results)} individual results")
         return all_results
     
-    def save_visualizations(self, visualization_data, filename_prefix='visualization'):
+    def save_tensors(self, tensors_dict, filename_prefix='tensors', to_base_dir=False):
+        """
+        Save tensors to files.
+        """
+        def convert_tensors(obj):
+            if isinstance(obj, dict):
+                return {k: convert_tensors(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_tensors(v) for v in obj]
+            elif isinstance(obj, torch.Tensor) and hasattr(obj, 'cpu') and hasattr(obj, 'numpy'):
+                return obj.cpu().numpy()
+            else:
+                return obj
+
+        # Convert tensors to numpy for serialization
+        serializable_features = convert_tensors(tensors_dict)
+        
+        filename = os.path.join(self.base_dir if to_base_dir else self.results_dir, f'{filename_prefix}.pkl')
+        with open(filename, 'wb') as f:
+            pickle.dump(serializable_features, f)
+            
+    def load_tensors(self, filename_prefix='tensors', from_base_dir=False):
+        """
+        Load tensors from files.
+        """
+        filename = os.path.join(self.base_dir if from_base_dir else self.results_dir, f'{filename_prefix}.pkl')
+        with open(filename, 'rb') as f:
+            tensors = pickle.load(f)
+        return tensors
+        
+    def save_metadata(self, metadata, filename_prefix='visualization', to_base_dir=False):
         """
         Save visualization metadata and file paths.
         
         Args:
-            visualization_data: Dictionary containing visualization info
+            metadata: Data to be saved as metadata. Accepts any JSON-serializable data
             filename_prefix: Prefix for the metadata filename
+            to_base_dir: If True, save metadata to the base directory instead of the results directory
             
         Returns:
             str: Path to saved metadata file
         """
-        metadata_path = os.path.join(self.results_dir, f'{filename_prefix}_metadata.json')
+        
+        metadata_path = os.path.join(self.base_dir if to_base_dir else self.results_dir, f'{filename_prefix}_metadata.json')
         
         def make_json_serializable(obj):
             if isinstance(obj, (dict)):
@@ -2223,7 +2343,7 @@ class DataManager:
             else:
                 return str(obj)
         
-        serializable_data = make_json_serializable(visualization_data)
+        serializable_data = make_json_serializable(metadata)
         
         with open(metadata_path, 'w') as f:
             json.dump(serializable_data, f, indent=2)
@@ -2231,17 +2351,18 @@ class DataManager:
         print(f"Visualization metadata saved to: {metadata_path}")
         return metadata_path
     
-    def load_visualization_metadata(self, filename_prefix='visualization'):
+    def load_metadata(self, filename_prefix='visualization', from_base_dir=False):
         """
         Load visualization metadata.
         
         Args:
             filename_prefix: Prefix used when saving
+            from_base_dir: If True, load metadata from the base directory instead of the results directory
             
         Returns:
             Dictionary of visualization metadata
         """
-        metadata_path = os.path.join(self.results_dir, f'{filename_prefix}_metadata.json')
+        metadata_path = os.path.join(self.base_dir if from_base_dir else self.results_dir, f'{filename_prefix}_metadata.json')
         
         if not os.path.exists(metadata_path):
             raise FileNotFoundError(f"Visualization metadata not found: {metadata_path}")
@@ -2389,27 +2510,40 @@ class DataManager:
     def save_plot(self, fig, filename):
         """Save plot if save_plots is True"""
         if self.save_plots and isinstance(fig, plt.Figure):
-                filepath = os.path.join(self.results_dir, filename)
+                filepath = os.path.join(self.results_dir, f"{filename}.png")
                 fig.savefig(filepath, dpi=300, bbox_inches='tight')
                 print(f"Saved plot: {filepath}")
         elif self.save_plots:
             raise ValueError("Provided fig is not a matplotlib Figure instance.")
     
-    def save_classifier(self, classifier, filename):
+    def save_classifier(self, classifier, metadata):
         """
         Save a trained sklearn classifier using joblib.
         
         Args:
             classifier: Trained sklearn model
             filename: Name of the file (e.g., 'logistic_classifier.pkl')
+            metadata: Additional metadata to save with the classifier
         """
         # if DEBUG:
         #     print("Debug mode: skipping saving classifier")
         #     return None
+        if not SAVE_CLASSIFIERS:
+            print("Saving classifiers is disabled by configuration.")
+            return None
         try:
+            assert isinstance(metadata, dict), "Metadata must be a dictionary"
+            model_name = metadata.get("model_name", "unknown_model")
+            benchmark_name = metadata.get("benchmark_name", "unknown_benchmark")
+            neighbor_method = metadata.get("neighbor_method", "unknown_method")
+            classifier_type = metadata.get("classifier_type", "unknown_type")
+            clf_name = metadata.get("clf_name", "unknown_clf")
+            filename = f"{model_name.replace('/', '_')}_{benchmark_name}_{neighbor_method}_{classifier_type}_{clf_name}_classifier.pkl"
             filepath = os.path.join(self.results_dir, filename)
             joblib.dump(classifier, filepath)
             print(f"💾 Classifier saved to: {filepath}")
+            metadata['filepath'] = filepath
+            self.classifiers[filename] = metadata
             return filepath
         except Exception as e:
             print(f"❌ Error saving classifier {filename}: {e}")
@@ -2426,37 +2560,122 @@ class DataManager:
             Loaded classifier model
         """
         try:
-            filepath = os.path.join(self.results_dir, filename)
+            metadata = self.classifiers.get(filename, {})
+            if metadata == {}:
+                print(f"No metadata found for classifier: {filename}")
+                filepath = os.path.join(self.results_dir, filename)
+                if not os.path.exists(filepath):
+                    raise FileNotFoundError(f"Classifier file not found: {filepath}")
+                classifier = joblib.load(filepath)
+                print(f"📂 Classifier loaded from: {filepath}")
+                return classifier, None
+            
+            filepath = metadata.get('filepath', os.path.join(self.results_dir, filename))
             if not os.path.exists(filepath):
                 raise FileNotFoundError(f"Classifier file not found: {filepath}")
             classifier = joblib.load(filepath)
             print(f"📂 Classifier loaded from: {filepath}")
-            return classifier
+            return classifier, metadata            
         except Exception as e:
             print(f"❌ Error loading classifier {filename}: {e}")
             return None
     
-    def list_classifiers(self):
+    def save_list_classifiers(self, filename_prefix="classifiers"):
+        """
+        Save the list of classifiers to a file.
+        """
+        if SAVE_CLASSIFIERS:
+            self.save_metadata(metadata = self.classifiers, filename_prefix=filename_prefix, to_base_dir=True)
+        
+    def get_list_classifiers(self, filename_prefix="classifiers"):
         """
         List all saved classifier files in the results directory.
         
         Returns:
-            List of classifier filenames
+            classifier_files = List of classifier filenames
+            metadata = Dictionary containing metadata for each classifier or None if not available
         """
-        if not os.path.exists(self.results_dir):
-            print(f"Results directory does not exist: {self.results_dir}")
-            return []
+        classifier_files, metadata = [], None
+        if self.classifiers:
+            classifier_files = list(self.classifiers.keys())
+            return classifier_files, self.classifiers
         
-        classifier_files = [f for f in os.listdir(self.results_dir) if f.endswith('_classifier.pkl')]
-        
-        if classifier_files:
-            print(f"Found {len(classifier_files)} classifier files:")
-            for file in classifier_files:
-                print(f"  🤖 {file}")
+        elif not filename_prefix.endswith('.json'):
+            classifiers_metadata = self.load_metadata(filename_prefix=filename_prefix, from_base_dir=True)
+            classifier_files = list(classifiers_metadata.keys())
+            return classifier_files, classifiers_metadata
+            
+        elif filename_prefix.endswith('.json'):
+            filename = filename_prefix
+            if os.path.exists(filename):
+                with open(filename, 'r') as f:
+                    classifiers_metadata = json.load(f)
+                    
+                classifier_files = list(classifiers_metadata.keys())
+                return classifier_files, classifiers_metadata
+            else:
+                print(f"Metadata file not found in: {filename}")
+                return {}
         else:
+            print(f"No classifiers have been saved yet. Searching in {self.results_dir} for *_classifier.pkl files")
+            
+            if not os.path.exists(self.results_dir):
+                print(f"Results directory does not exist: {self.results_dir}")
+                return []
+            
+            classifier_files = [f for f in os.listdir(self.results_dir) if f.endswith('_classifier.pkl')]
+            
+            if classifier_files:
+                print(f"Found {len(classifier_files)} classifier files:")
+                for file in classifier_files:
+                    print(f"  🤖 {file}")
+            else:
+                print("No classifier files found.")
+            
+        if metadata is None:
+            print("No metadata available for classifiers.")
+        if not classifier_files:
             print("No classifier files found.")
+        return classifier_files, metadata
+    
+    def save_tensors_and_metadata(self, features_dict, metadata, filename_prefix):
+        """
+        Save normalized feature tensors and metadata using DataManager.
         
-        return classifier_files
+        Args:
+            data_manager: DataManager instance
+            features_dict: Dictionary containing feature tensors for forget, retain, holdout splits
+            metadata: Dictionary containing metadata (model_name, benchmark_name, neighbor_method, etc.)
+            filename_prefix: Prefix for the filename to save tensors and metadata
+        """  
+        # Create a unique base filename from metadata
+        model_name = metadata.get('model_name', 'unknown').replace('/', '_')
+        benchmark_name = metadata.get('benchmark_name', 'unknown')
+        
+        self.set_subdirectory(f"{model_name}_{benchmark_name}")
+        
+        self.save_tensors(tensors_dict=features_dict, filename_prefix=filename_prefix)
+        
+        self.return_one_subdir_up()
+        
+    def load_tensors_and_metadata(self, metadata, filename_prefix):
+        """
+        Load normalized feature tensors and metadata using DataManager.
+        
+        Args:
+            data_manager: DataManager instance
+            filename_prefix: Prefix for the filename to load tensors and metadata
+        Returns:
+            features_dict: Dictionary containing feature tensors for forget, retain, holdout splits
+        """
+        
+        model_name = metadata.get('model_name', 'unknown').replace('/', '_')
+        benchmark_name = metadata.get('benchmark_name', 'unknown')
+        self.set_subdirectory(f"{model_name}_{benchmark_name}")
+        
+        features_dict = self.load_tensors(filename_prefix=filename_prefix)
+        
+        self.return_one_subdir_up()    
 
 
 def run_comprehensive_experiments(max_models_per_family=3, subset_size=25, force_rerun=False, data_manager=None, rephrasing_methods=['token_embedding_proximity', 'random_token_replacement', 'context_based_token_replacement']):
@@ -2513,9 +2732,9 @@ def run_comprehensive_experiments(max_models_per_family=3, subset_size=25, force
     # Run evaluations
     for i, (model_name, benchmark_name) in enumerate(model_benchmark_mapping.items(), 1):
         
-         # Debug mode: limit to first 2 evaluations
-        if DEBUG and i >= 2:
-            print("Debug mode: stopping after 2 evaluations")
+         # Debug mode: limit to first 3 evaluations
+        if DEBUG and i >= 3:
+            print("Debug mode: stopping after 3 evaluations")
             break
         print(f"   Model: {model_name}")
         print(f"   Benchmark: {benchmark_name}")
@@ -2563,6 +2782,7 @@ def run_comprehensive_experiments(max_models_per_family=3, subset_size=25, force
     print(f"   Newly evaluated: {len(all_results) - loaded_count}")
     
     # Save final combined results
+    data_manager.save_list_classifiers()
     data_manager.save_experiment_results(all_results, filename='all_experiment_results.json')
     
     return all_results
@@ -2910,7 +3130,7 @@ print(f"  Expected total evaluations: ~{MAX_MODELS_PER_FAMILY * 3 * 2}")  # fami
 all_results = run_comprehensive_experiments(
     max_models_per_family=MAX_MODELS_PER_FAMILY,
     subset_size=SUBSET_SIZE,
-    force_rerun= DEBUG,  # Set to True to rerun all experiments
+    force_rerun= True,  # Set to True to rerun all experiments
     data_manager=dm,
     rephrasing_methods=['token_embedding_proximity']
 )
@@ -3813,12 +4033,751 @@ print("✅ Visualization utility functions defined!")
 print("💡 Use save_all_visualizations_to_dm(), load_and_display_visualizations(), and display_visualization_summary()")
 
 
+def test_classifier_transferability(
+    data_manager,
+    sampling_strategy='random',
+    n_samples=10,
+    fixed_axis=None,
+    fixed_value=None,
+    test_size=0.2,
+    verbose=True
+):
+    """
+    Test transferability of trained classifiers across different models and datasets.
+    
+    This function loads saved classifiers and tests them on data from different
+    model-dataset combinations to evaluate how well classifiers generalize.
+    
+    Args:
+        data_manager: DataManager instance with access to saved classifiers and data
+        sampling_strategy: Strategy for selecting pairs to test
+            - 'random': Random sampling of train/test pairs (default)
+            - 'fixed_model': Fix model, vary dataset (requires fixed_axis='model')
+            - 'fixed_dataset': Fix dataset, vary model (requires fixed_axis='dataset')
+            - 'cross_only': Only test cross-combinations (different model AND dataset)
+            - 'all': Test all possible combinations (WARNING: can be very large)
+        n_samples: Number of pairs to sample (used for 'random' strategy)
+        fixed_axis: Which axis to fix ('model', 'dataset', or 'neighbor_method')
+        fixed_value: Value to fix the axis to (e.g., specific model name)
+        test_size: Proportion of data to use for testing
+        verbose: Whether to print detailed progress information
+        
+    Returns:
+        pandas.DataFrame: Results table with columns:
+            - train_model: Model used for training
+            - train_dataset: Dataset used for training  
+            - train_neighbor_method: Neighbor method used for training
+            - test_model: Model used for testing
+            - test_dataset: Dataset used for testing
+            - test_neighbor_method: Neighbor method used for testing
+            - classifier_type: Type of classifier
+            - classifier_name: Name of specific classifier
+            - test_accuracy: Accuracy on test data
+            - test_auc: AUC on test data
+            - is_same_model_type: Whether train/test used same model
+            - is_same_dataset: Whether train/test used same dataset
+            - is_same_neighbor: Whether train/test used same neighbor method
+            
+    Examples:
+        # Random sampling of 20 pairs
+        results = test_classifier_transferability(dm, sampling_strategy='random', n_samples=20)
+        
+        # Fix model, test on different datasets
+        results = test_classifier_transferability(
+            dm, 
+            sampling_strategy='fixed_model',
+            fixed_axis='model',
+            fixed_value='llama-3-8b-instruct-elm-checkpoint-8'
+        )
+        
+        # Only test cross-transfer (different model AND dataset)
+        results = test_classifier_transferability(dm, sampling_strategy='cross_only')
+        
+        # Test all combinations (WARNING: can take a long time!)
+        results = test_classifier_transferability(dm, sampling_strategy='all')
+    """
+    
+    if verbose:
+        print("🔍 Starting classifier transferability analysis...")
+        print(f"   Strategy: {sampling_strategy}")
+        if sampling_strategy == 'random':
+            print(f"   Samples: {n_samples}")
+        if fixed_axis:
+            print(f"   Fixed axis: {fixed_axis} = {fixed_value}")
+    
+    # Get all saved classifiers
+    classifier_files, classifiers_metadata_dict = data_manager.get_list_classifiers()
+    
+    if not classifier_files:
+        print("❌ No saved classifiers found!")
+        return pd.DataFrame()
+    
+    def filter_data(metadata):
+        classifier_type = metadata.get('classifier_type', 'unknown')
+        clf_name = metadata.get('clf_name', 'unknown')
+        neighbor_method = metadata.get('neighbor_method', 'unknown')
+        
+        if classifier_type in ['binary_comparisons'] or \
+            neighbor_method not in ['token_embedding_proximity']:
+            return False
+        
+        return True
+    
+    # Convert metadata dict to list format for easier processing
+    classifiers_metadata = []
+    if classifiers_metadata_dict:
+        for filename, metadata in classifiers_metadata_dict.items():
+            model_name = metadata.get('model_name', 'unknown')
+            if 'llama-3-8b-instruct' in model_name:
+                model_type = 'llama-3-8b-instruct-elm-checkpoint-8'
+            elif 'Llama-2-7b-chat' in model_name:
+                model_type = 'Llama-2-7b-chat'
+            elif 'zephyr-7b-beta' in model_name:
+                model_type = 'zephyr-7b-beta'
+            else:
+                model_type = model_name
+            
+            classifier_type = metadata.get('classifier_type', 'unknown')
+            clf_name = metadata.get('clf_name', 'unknown')
+            neighbor_method = metadata.get('neighbor_method', 'unknown')
+            
+            if not filter_data(metadata):
+                continue
+            classifiers_metadata.append({
+                'filename': filename,
+                'model': model_type,
+                'model_name': model_name,
+                'dataset': metadata.get('benchmark_name', 'unknown'),
+                'neighbor_method': neighbor_method,
+                'classifier_type': classifier_type,
+                'clf_name': clf_name
+            })
+    else:
+        # Fallback: parse filenames if metadata not available
+        for clf_file in classifier_files:
+            parts = clf_file.replace('_classifier.pkl', '').split('_')
+            if len(parts) >= 5:
+                # Find where dataset starts (TOFU, WMDP, or MUSE)
+                dataset_idx = -1
+                for i, part in enumerate(parts):
+                    if part in ['TOFU', 'WMDP', 'MUSE']:
+                        dataset_idx = i
+                        break
+                
+                if dataset_idx == -1:
+                    continue
+                    
+                model = '_'.join(parts[:dataset_idx])
+                dataset = parts[dataset_idx]
+                neighbor_method = parts[dataset_idx + 1]
+                classifier_type = parts[dataset_idx + 2]
+                clf_name = '_'.join(parts[dataset_idx + 3:])
+                
+                if neighbor_method not in ['token_embedding_proximity'] or \
+                    clf_name not in ['random_forest']:
+                    continue
+                
+                classifiers_metadata.append({
+                    'filename': clf_file,
+                    'model': model,
+                    'dataset': dataset,
+                    'neighbor_method': neighbor_method,
+                    'classifier_type': classifier_type,
+                    'clf_name': clf_name
+                })
+                
+    # classifiers_metadata = [c for c in classifiers_metadata if c['classifier_type'] in ['random_forest'] and c['neighbor_method'] in ['token_embedding_proximity']]
+    
+    if verbose:
+        print(f"\n📊 Found {len(classifiers_metadata)} classifiers:")
+        models = set(c['model'] for c in classifiers_metadata)
+        datasets = set(c['dataset'] for c in classifiers_metadata)
+        neighbor_methods = set(c['neighbor_method'] for c in classifiers_metadata)
+        print(f"   Models: {len(models)}")
+        print(f"   Datasets: {len(datasets)}")
+        print(f"   Neighbor methods: {len(neighbor_methods)}")
+    
+    # filter out if 'neighbor_method'!= 'token_embedding_proximity' to reduce combinations
+    # classifiers_metadata = [c for c in classifiers_metadata if c['neighbor_method'] == 'token_embedding_proximity']
+    # classifiers_metadata = [c for c in classifiers_metadata if c['clf_name'] == 'random_forest']
+    
+    
+    if not classifiers_metadata:
+        print("❌ No classifiers found after filtering!")
+        raise ValueError("No classifiers found after filtering!")
+    
+    def filter_pairs(train_clf, test_clf):
+        if train_clf["classifier_type"] in ['clustering'] or \
+                test_clf["classifier_type"] in ['clustering'] or \
+                train_clf["clf_name"] in ['logistic'] or test_clf["clf_name"] in ['logistic'] or \
+                train_clf["classifier_type"] != test_clf["classifier_type"] or \
+                train_clf == test_clf:
+            return False
+
+        return True
+    # Generate pairs based on strategy
+    pairs = []
+    if sampling_strategy == 'all':
+        # Test all combinations
+        for train_clf in classifiers_metadata:
+            for test_clf in classifiers_metadata:
+                if train_clf["classifier_type"] == test_clf["classifier_type"]\
+                    and train_clf != test_clf:
+                    pairs.append((train_clf, test_clf))
+        if verbose:
+            print(f"\n⚠️  Testing ALL {len(pairs)} combinations (this may take a while!)")
+    elif sampling_strategy == 'random':
+        # Random sampling
+        import random
+        
+        pairs = []
+        seen = set()
+        random.shuffle(classifiers_metadata)
+        for i, train_clf in enumerate(classifiers_metadata):
+            if train_clf["classifier_type"] in ['clustering']:
+                continue  # skip clustering classifiers for now
+            for test_clf in classifiers_metadata[i+1:]:
+                if filter_pairs(train_clf, test_clf):
+                    sample_key = tuple([train_clf['filename'], test_clf['filename']])
+                    if sample_key in seen:
+                        continue  # already sampled
+                    seen.add(sample_key)
+                    
+                    pairs.append((train_clf, test_clf))
+                    
+                    if len(pairs) == n_samples:
+                        break
+        
+        if verbose:
+            print(f"\n🎲 Randomly sampled {len(pairs)} pairs")
+            
+        pairs = list(pairs)
+    
+    elif sampling_strategy == 'cross_only':
+        # Only test when model AND dataset are different
+        for train_clf in classifiers_metadata:
+            for test_clf in classifiers_metadata:
+                if (train_clf['model'] != test_clf['model'] and 
+                    train_clf['dataset'] != test_clf['dataset']):
+                    pairs.append((train_clf, test_clf))
+        
+        if verbose:
+            print(f"\n🔀 Testing {len(pairs)} cross-transfer pairs (different model AND dataset)")
+    
+    elif sampling_strategy in ['fixed_model', 'fixed_dataset', 'fixed_neighbor']:
+        # Fix one axis
+        if not fixed_axis or not fixed_value:
+            raise ValueError("fixed_axis and fixed_value must be provided for fixed strategies")
+        
+        # Get classifiers matching the fixed value
+        fixed_classifiers = [c for c in classifiers_metadata if c[fixed_axis] == fixed_value]
+        
+        if not fixed_classifiers:
+            print(f"❌ No classifiers found with {fixed_axis}={fixed_value}")
+            return pd.DataFrame()
+        
+        # Test on all other combinations
+        for train_clf in fixed_classifiers:
+            for test_clf in classifiers_metadata:
+                pairs.append((train_clf, test_clf))
+        
+        if verbose:
+            print(f"\n📌 Fixed {fixed_axis}={fixed_value}, testing {len(pairs)} pairs")
+    
+    else:
+        raise ValueError(f"Unknown sampling strategy: {sampling_strategy}")
+    
+    # Load all unique test data combinations ONCE before the loop
+    # This is much more efficient than loading in the loop
+    if verbose:
+        print(f"\n📦 Pre-loading test data for all unique model/dataset combinations...")
+    
+    # Get unique test combinations
+    unique_test_combinations = set()
+    for _, test_clf in pairs:
+        unique_test_combinations.add((test_clf['model_name'], test_clf['dataset']))
+    
+    # Pre-load all test data
+    test_data_cache = {}
+    for model, dataset in tqdm(unique_test_combinations, disable=not verbose, desc="Loading test data"):
+        try:
+            # Reconstruct model name with slashes
+            model_name_slashes = model.replace('/', '_')
+            
+            # Load the saved tensor data
+            data_manager.set_subdirectory(f"{model_name_slashes}_{dataset}")
+            
+            # Load the pre-computed normalized features
+            try:
+                features_path = os.path.join(data_manager.results_dir, 'post_processed_features_dict.pkl')
+                with open(features_path, 'rb') as f:
+                    features_dict = pickle.load(f)
+                
+                # Extract normalized features for each split
+                forget_features = features_dict['forget']['normalized_features_tensor']
+                retain_features = features_dict['retain']['normalized_features_tensor']
+                holdout_features = features_dict['holdout']['normalized_features_tensor']
+                
+                # Convert to numpy if needed
+                if isinstance(forget_features, torch.Tensor):
+                    forget_features = forget_features.cpu().numpy()
+                if isinstance(retain_features, torch.Tensor):
+                    retain_features = retain_features.cpu().numpy()
+                if isinstance(holdout_features, torch.Tensor):
+                    holdout_features = holdout_features.cpu().numpy()
+                    
+                # take only test size portion
+                min_size = min(len(forget_features), len(retain_features), len(holdout_features))
+                test_subset_size = int(min_size * (1 - test_size))
+                
+                forget_features = forget_features[-test_subset_size:]
+                retain_features = retain_features[-test_subset_size:]
+                holdout_features = holdout_features[-test_subset_size:]
+                
+                # Create combined features and labels
+                X = np.vstack([forget_features, retain_features, holdout_features])
+                y = np.concatenate([
+                    np.zeros(len(forget_features)),      # 0 = forget
+                    np.ones(len(retain_features)),       # 1 = retain
+                    np.full(len(holdout_features), 2)    # 2 = holdout
+                ])
+                
+                test_data_cache[(model, dataset)] = (X, y)
+                
+                if verbose:
+                    print(f"  ✅ Loaded {model}/{dataset}: {X.shape[0]} samples with {X.shape[1]} features")
+                    
+            except FileNotFoundError:
+                if verbose:
+                    print(f"  ⚠️  No saved features found for {model}/{dataset}")
+                data_manager.return_one_subdir_up()
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠️  Error loading {model}/{dataset}: {e}")
+                data_manager.return_one_subdir_up()
+            
+            data_manager.return_one_subdir_up()
+            
+        except Exception as e:
+            if verbose:
+                print(f"  ❌ Failed to load {model}/{dataset}: {e}")
+    
+    if verbose:
+        print(f"\n✅ Pre-loaded {len(test_data_cache)} test datasets")
+        print(f"\n🧪 Testing {len(pairs)} classifier pairs...")
+    
+    results = []
+    
+    
+    for train_clf, test_clf in tqdm(pairs, disable=not verbose, desc="Testing pairs"):
+        try:
+            # Load trained classifier
+            clf, clf_metadata = data_manager.load_classifier(train_clf['filename'])
+            if clf is None:
+                continue
+            # if 'random_forest' not in train_clf['clf_name']:
+            #     continue  # skip non-random forest classifiers for now
+            
+            # Get pre-loaded test data
+            test_key = (test_clf['model_name'], test_clf['dataset'])
+            if test_key not in test_data_cache.keys():
+                if verbose:
+                    print(f"⚠️  No cached data for {test_clf['model']}/{test_clf['dataset']}")
+                continue
+            
+            X_test, y_test = test_data_cache[test_key]
+            
+            # 0 = forget, 1 = retain, 2 = holdout
+            if clf_metadata['classifier_type'] == 'retain_vs_all':
+                y_test = (y_test == 1).astype(int)  # 1 = retain, 0 = forget or holdout
+            elif clf_metadata['classifier_type'] == 'forget_vs_all':
+                y_test = (y_test == 0).astype(int)  # 1 = forget, 0 = retain or holdout
+            elif clf_metadata['classifier_type'] == 'holdout_vs_all':
+                y_test = (y_test == 2).astype(int)  # 1 = holdout, 0 = forget or retain
+            elif clf_metadata['classifier_type'] == 'overall_predictors':
+                # multi-class: keep as is
+                pass
+            # elif 'retain_vs_all' in clf_metadata['clf_name']:
+            #     y_test = (y_test == 1).astype(int)  # 1 = retain, 0 = forget or holdout
+            # elif 'forget_vs_all' in clf_metadata['clf_name']:
+            #     y_test = (y_test == 0).astype(int)  # 1 = forget, 0 = retain or holdout
+            # elif 'holdout_vs_all' in clf_metadata['clf_name']:
+            #     y_test = (y_test == 2).astype(int)  # 1 = holdout, 0 = forget or retain
+            elif clf_metadata['classifier_type'] == 'retain_vs_forget':
+                X_test = X_test[y_test != 2]
+                y_test = y_test[y_test != 2]
+                y_test = (y_test == 1).astype(int)  # 1 = retain, 0 = forget
+            elif clf_metadata['classifier_type'] == 'retain_vs_holdout':
+                X_test = X_test[y_test != 0]
+                y_test = y_test[y_test != 0]
+                y_test = (y_test == 1).astype(int)  # 1 = retain, 0 = holdout
+            elif clf_metadata['classifier_type'] == 'forget_vs_holdout':
+                X_test = X_test[y_test != 1]
+                y_test = y_test[y_test != 1]
+                y_test = (y_test == 0).astype(int)  # 1 = forget, 0 = holdout
+            else:
+                continue
+            
+            # Skip if no valid data
+            if len(X_test) == 0:
+                continue
+            
+            # Make predictions
+            y_pred = clf.predict(X_test)
+            y_pred_proba = clf.predict_proba(X_test) if hasattr(clf, 'predict_proba') else None
+            
+            # Calculate metrics
+            from sklearn.metrics import accuracy_score, roc_auc_score
+            
+            accuracy = accuracy_score(y_test, y_pred)
+            
+            # Calculate AUC (multi-class)
+            auc = None
+            if y_pred_proba is not None:
+                try:
+                    # Check if the number of classes matches
+                    n_classes_test = len(np.unique(y_test))
+                    n_classes_pred = y_pred_proba.shape[1]
+                    
+                    if n_classes_test == n_classes_pred:
+                        if n_classes_test == 2:
+                            # Binary classification: Use positive class probabilities only
+                            auc = roc_auc_score(y_test, y_pred_proba[:, 1])
+                        else:
+                            # Multi-class: Use full probability array with ovr
+                            auc = roc_auc_score(y_test, y_pred_proba, multi_class='ovr', average='macro')
+                    else:
+                        if verbose:
+                            print(f"  ⚠️  Class mismatch: y_test has {n_classes_test} classes, predictions have {n_classes_pred} classes. Skipping AUC.")
+                        auc = None
+                        continue
+                except Exception as e:
+                    if verbose:
+                        print(f"  ⚠️  Could not compute AUC: {e}")
+                    auc = None
+                            
+            # Record results
+            results.append({
+                'train_model': train_clf['model'],
+                'train_model_name': train_clf['model_name'],
+                'train_dataset': train_clf['dataset'],
+                'train_neighbor_method': train_clf['neighbor_method'],
+                'test_model': test_clf['model'],
+                'test_model_name': test_clf['model_name'],
+                'test_dataset': test_clf['dataset'],
+                'test_neighbor_method': test_clf['neighbor_method'],
+                'classifier_type': train_clf['classifier_type'],
+                'classifier_name': train_clf['clf_name'],
+                'test_accuracy': accuracy,
+                'test_auc': auc,
+                'is_same_model_type': train_clf['model'] == test_clf['model'],
+                'is_same_model_name': train_clf['model_name'] == test_clf['model_name'],
+                'is_same_dataset': train_clf['dataset'] == test_clf['dataset'],
+                'is_same_neighbor': train_clf['neighbor_method'] == test_clf['neighbor_method'],
+                'is_same_classifier': train_clf['classifier_type'] == test_clf['classifier_type'] and train_clf['clf_name'] == test_clf['clf_name'],
+                'n_test_samples': len(X_test)
+            })
+            
+        except Exception as e:
+            if verbose:
+                print(f"❌ Error testing {train_clf['filename']} on {test_clf['model']}/{test_clf['dataset']}: {e}")
+            continue
+    
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    if verbose and not results_df.empty:
+        print(f"\n✅ Completed {len(results_df)} successful tests")
+        print(f"\n📊 Summary statistics:")
+        print(f"   Average accuracy (same model): {results_df[results_df['is_same_model_type']]['test_accuracy'].mean():.3f}")
+        print(f"   Average accuracy (different model): {results_df[~results_df['is_same_model_type']]['test_accuracy'].mean():.3f}")
+        print(f"   Average accuracy (same dataset): {results_df[results_df['is_same_dataset']]['test_accuracy'].mean():.3f}")
+        print(f"   Average accuracy (different dataset): {results_df[~results_df['is_same_dataset']]['test_accuracy'].mean():.3f}")
+    
+    return results_df
+
+
+def analyze_transferability_results(results_df, save_path=None):
+    """
+    Analyze and visualize transferability test results.
+    
+    Args:
+        results_df: DataFrame from test_classifier_transferability()
+        save_path: Optional path to save visualizations
+        
+    Returns:
+        dict: Dictionary containing analysis results and figures
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    if results_df.empty:
+        print("❌ No results to analyze")
+        return {}
+    
+    print("📊 Analyzing transferability results...")
+    
+    analysis = {}
+    
+    # 1. Overall transfer performance
+    print("\n1️⃣ Overall Transfer Performance:")
+    print("(results_df['classifier_type'] != 'overall_predictors')")
+    cross_unlearning = results_df[
+        results_df['is_same_model_type'] & 
+        results_df['is_same_dataset'] & 
+        results_df['is_same_neighbor'] &
+        results_df['is_same_classifier'] 
+        & (results_df['classifier_type'] != 'overall_predictors')
+    ]
+    cross_model = results_df[
+        ~results_df['is_same_model_type'] & 
+        results_df['is_same_dataset'] & 
+        results_df['is_same_neighbor'] &
+        results_df['is_same_classifier'] 
+        & (results_df['classifier_type'] != 'overall_predictors')
+    ]
+    cross_dataset = results_df[
+        results_df['is_same_model_type'] & 
+        ~results_df['is_same_dataset'] & 
+        results_df['is_same_neighbor'] &
+        results_df['is_same_classifier']
+        & (results_df['classifier_type'] != 'overall_predictors')
+    ]
+    
+    full_cross = results_df[
+        ~results_df['is_same_model_type'] & 
+        ~results_df['is_same_dataset'] & 
+        results_df['is_same_neighbor'] &
+        results_df['is_same_classifier']
+        & (results_df['classifier_type'] != 'overall_predictors')
+    ]
+    
+    print(f"   Cross-unlearning (same dataset+neighbor+classifier): {cross_unlearning['test_accuracy'].mean():.3f} ± {cross_unlearning['test_accuracy'].std():.3f} (n={len(cross_unlearning)})")
+    print(f"   Cross-model transfer (same dataset): {cross_model['test_accuracy'].mean():.3f} ± {cross_model['test_accuracy'].std():.3f} (n={len(cross_model)})")
+    print(f"   Cross-dataset transfer (same model): {cross_dataset['test_accuracy'].mean():.3f} ± {cross_dataset['test_accuracy'].std():.3f} (n={len(cross_dataset)})")
+    print(f"   Full cross-transfer (different model & dataset): {full_cross['test_accuracy'].mean():.3f} ± {full_cross['test_accuracy'].std():.3f} (n={len(full_cross)})")
+    
+    analysis['overall'] = {
+        'cross_unlearning': cross_unlearning['test_accuracy'].mean(),
+        'cross_model': cross_model['test_accuracy'].mean(),
+        'cross_dataset': cross_dataset['test_accuracy'].mean(),
+        'full_cross': full_cross['test_accuracy'].mean()
+    }
+    
+    # 2. Transfer by classifier type
+    print("\n2️⃣ Transfer Performance by Classifier Type:")
+    for clf_type in sorted(results_df['classifier_type'].unique()):
+        clf_results = results_df[results_df['classifier_type'] == clf_type]
+        print(f"   {clf_type}: {clf_results['test_accuracy'].mean():.3f} ± {clf_results['test_accuracy'].std():.3f}")
+    
+    # 3. Create visualization for transfer performance
+    print("\n3️⃣ Creating transfer performance visualization...")
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Boxplot by transfer type
+    transfer_data = []
+    transfer_labels = []
+    
+    means = []
+    stds = []
+    
+    for name, data in [("Cross-Unlearning", cross_unlearning), 
+                       ("Cross-Model", cross_model), 
+                       ("Cross-Dataset", cross_dataset),
+                       ("Full Cross", full_cross)]:
+        if len(data) > 0:
+            transfer_data.append(data['test_accuracy'].values)
+            transfer_labels.append(name)
+            means.append(data['test_accuracy'].mean())
+            stds.append(data['test_accuracy'].std())
+    
+    axes[0].boxplot(transfer_data, labels=transfer_labels)
+    axes[0].set_title('Transfer Performance Distribution', fontsize=14, fontweight='bold')
+    axes[0].set_ylabel('Test Accuracy', fontsize=12)
+    axes[0].grid(axis='y', alpha=0.3)
+    axes[0].tick_params(axis='x', rotation=45)
+    
+    # Plot 2: Bar plot with error bars
+    x_pos = range(len(transfer_labels))
+    axes[1].bar(x_pos, means, yerr=stds, capsize=5, alpha=0.7, color='steelblue')
+    axes[1].set_xticks(x_pos)
+    axes[1].set_xticklabels(transfer_labels, rotation=45, ha='right')
+    axes[1].set_title('Mean Accuracy by Transfer Type', fontsize=14, fontweight='bold')
+    axes[1].set_ylabel('Test Accuracy', fontsize=12)
+    axes[1].grid(axis='y', alpha=0.3)
+    
+    # Add value labels on bars
+    for i, (mean, std) in enumerate(zip(means, stds)):
+        axes[1].text(i, mean + std + 0.02, f'{mean:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    analysis['transfer_performance_fig'] = fig
+    
+    if save_path:
+        dm.save_plot(fig, f"{save_path}_transfer_performance")
+    
+    # 4. Model-to-model transfer matrix
+    print("\n4️⃣ Creating model-to-model transfer matrix...")
+    
+    same_dataset_same_clf = results_df[
+        results_df['is_same_dataset'] & 
+        results_df['is_same_neighbor'] &
+        results_df['is_same_classifier']
+    ]
+    
+    if not same_dataset_same_clf.empty:
+        transfer_matrix = same_dataset_same_clf.groupby(['train_model', 'test_model'])['test_accuracy'].mean().unstack(fill_value=np.nan)
+        
+        fig2, ax2 = plt.subplots(figsize=(12, 10))
+        sns.heatmap(transfer_matrix, annot=True, fmt='.3f', cmap='RdYlGn', 
+                    vmin=0, vmax=1, ax=ax2, cbar_kws={'label': 'Accuracy'})
+        ax2.set_title('Model-to-Model Transfer Performance (Same Dataset)', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Test Model', fontsize=12)
+        ax2.set_ylabel('Train Model', fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
+        plt.tight_layout()
+        
+        analysis['model_transfer_matrix'] = transfer_matrix
+        analysis['model_transfer_fig'] = fig2
+        
+        if save_path:
+            dm.save_plot(fig2, f"{save_path}_model_transfer")
+    
+    # 5. Dataset-to-dataset transfer matrix
+    print("\n5️⃣ Creating dataset-to-dataset transfer matrix...")
+    
+    same_model_same_clf = results_df[
+        results_df['is_same_model_type'] & 
+        results_df['is_same_neighbor'] &
+        results_df['is_same_classifier']
+    ]
+    
+    if not same_model_same_clf.empty:
+        transfer_matrix_dataset = same_model_same_clf.groupby(['train_dataset', 'test_dataset'])['test_accuracy'].mean().unstack(fill_value=np.nan)
+        
+        fig3, ax3 = plt.subplots(figsize=(8, 6))
+        sns.heatmap(transfer_matrix_dataset, annot=True, fmt='.3f', cmap='RdYlGn',
+                    vmin=0, vmax=1, ax=ax3, cbar_kws={'label': 'Accuracy'})
+        ax3.set_title('Dataset-to-Dataset Transfer Performance (Same Model)', fontsize=14, fontweight='bold')
+        ax3.set_xlabel('Test Dataset', fontsize=12)
+        ax3.set_ylabel('Train Dataset', fontsize=12)
+        plt.tight_layout()
+        
+        analysis['dataset_transfer_matrix'] = transfer_matrix_dataset
+        analysis['dataset_transfer_fig'] = fig3
+        
+        if save_path:
+            dm.save_plot(fig3, f"{save_path}_dataset_transfer")
+    
+    print("\n✅ Analysis complete!")
+    
+    return analysis
+def get_available_classifiers_summary(data_manager):
+    """
+    Get a summary of available classifiers for transferability testing.
+    
+    Args:
+        data_manager: DataManager instance
+        
+    Returns:
+        dict: Summary information about available classifiers
+    """
+    classifier_files = data_manager.list_classifiers()
+    
+    if not classifier_files:
+        print("❌ No saved classifiers found!")
+        return {}
+    
+    # Parse metadata
+    metadata = []
+    for clf_file in classifier_files:
+        parts = clf_file.replace('_classifier.pkl', '').split('_')
+        
+        # Find dataset
+        dataset_idx = -1
+        for i, part in enumerate(parts):
+            if part in ['TOFU', 'WMDP', 'MUSE']:
+                dataset_idx = i
+                break
+        
+        if dataset_idx == -1:
+            continue
+        
+        model = '_'.join(parts[:dataset_idx])
+        dataset = parts[dataset_idx]
+        neighbor_method = parts[dataset_idx + 1]
+        classifier_type = parts[dataset_idx + 2]
+        clf_name = '_'.join(parts[dataset_idx + 3:])
+        
+        metadata.append({
+            'model': model,
+            'dataset': dataset,
+            'neighbor_method': neighbor_method,
+            'classifier_type': classifier_type,
+            'clf_name': clf_name
+        })
+    
+    # Create summary
+    df = pd.DataFrame(metadata)
+    
+    print("\n📊 Available Classifiers Summary")
+    print("="*80)
+    print(f"Total classifiers: {len(df)}")
+    print(f"\nModels ({len(df['model'].unique())}):")
+    for model in sorted(df['model'].unique()):
+        count = len(df[df['model'] == model])
+        print(f"   • {model}: {count} classifiers")
+    
+    print(f"\nDatasets ({len(df['dataset'].unique())}):")
+    for dataset in sorted(df['dataset'].unique()):
+        count = len(df[df['dataset'] == dataset])
+        print(f"   • {dataset}: {count} classifiers")
+    
+    print(f"\nNeighbor methods ({len(df['neighbor_method'].unique())}):")
+    for method in sorted(df['neighbor_method'].unique()):
+        count = len(df[df['neighbor_method'] == method])
+        print(f"   • {method}: {count} classifiers")
+    
+    print(f"\nClassifier types ({len(df['classifier_type'].unique())}):")
+    for clf_type in sorted(df['classifier_type'].unique()):
+        count = len(df[df['classifier_type'] == clf_type])
+        print(f"   • {clf_type}: {count} classifiers")
+    
+    print("="*80)
+    
+    # Calculate possible combinations
+    n_models = len(df['model'].unique())
+    n_datasets = len(df['dataset'].unique())
+    n_neighbors = len(df['neighbor_method'].unique())
+    
+    total_possible = len(df) ** 2
+    cross_model = len(df) * len(df[df['model'] != df['model'].iloc[0]])
+    cross_dataset = len(df) * len(df[df['dataset'] != df['dataset'].iloc[0]])
+    
+    print(f"\n💡 Transferability Testing Estimates:")
+    print(f"   Total possible pairs: {total_possible:,}")
+    print(f"   Cross-model pairs: ~{cross_model:,}")
+    print(f"   Cross-dataset pairs: ~{cross_dataset:,}")
+    print(f"   Recommended random samples: {min(100, total_possible // 10)}")
+    print("="*80 + "\n")
+    
+    return {
+        'metadata': df,
+        'n_classifiers': len(df),
+        'n_models': n_models,
+        'n_datasets': n_datasets,
+        'n_neighbors': n_neighbors,
+        'total_possible_pairs': total_possible
+    }
+
+
 # Updated table5 creation code
 import pandas as pd
 
 # Assuming the data is in a list called all_results
 # Extract relevant data for REMIND_OURS comparison across neighbor methods
-
 neighbor_methods = []
 for result in all_results:
     for rephrasing in result.get('rephrasing_results', []):
@@ -3832,7 +4791,7 @@ for result in all_results:
                 'Multi_Class_AUC_LogReg': round(rephrasing.get('Multi-class AUC', 0), 3),
                 'Retain_vs_All_AUC_LogReg': round(rephrasing.get('Retain vs All AUC', 0), 3),
                 'Forget_vs_All_AUC_LogReg': round(rephrasing.get('Forget vs All AUC', 0), 3),
-                'Holdout_vs_All_AUC_LogReg': round(rephrasing.get('Holdout vs All AUC', 0), 3)
+                'Holdout_vs_All_AUC_LogReg': round(rephrasing.get('Holdout vs All AUC', 0), 3),
             })
 
 # Create DataFrame
@@ -3900,8 +4859,119 @@ rephrasing_options_table = create_custom_table(all_results)
 
 print(rephrasing_options_table)
 
+# ============================================================================
+# TRANSFERABILITY TESTING EXAMPLES
+# ============================================================================
+if TRANSFERABILITY:
+    print("\n" + "="*80)
+    print("🔬 CLASSIFIER TRANSFERABILITY TESTING")
+    print("="*80)
+
+    # First, get a summary of available classifiers
+    # print("\n📋 Step 1: Check available classifiers")
+    # summary = get_available_classifiers_summary(dm)
+
+    # Example usage of transferability testing
+    # Uncomment the examples you want to run:
+
+    # Example 1: Random sampling (recommended for initial exploration)
+    # ---------------------------------------------------------------
+    print("\n🎲 Example 1: Random sampling of classifier pairs")
+    transferability_results = test_classifier_transferability(
+        dm,
+        sampling_strategy='random',
+        n_samples=800,  # Adjust based on summary recommendations
+        verbose=True
+    )
+
+    if not transferability_results.empty:
+        # Save results
+        dm.save_to_csv(transferability_results, 'transferability_results')
+        
+        # Analyze and visualize
+        analysis = analyze_transferability_results(
+            transferability_results,
+            save_path='transferability_random'
+        )
+
+    # Example 2: Fix model, test on different datasets
+    # ------------------------------------------------
+    # print("\n📌 Example 2: Fix model, test on different datasets")
+    # # Pick one of your trained models (check summary above)
+    # example_model = 'LLM-GAT_llama-3-8b-instruct-elm-checkpoint-8'
+    # 
+    # transferability_results = test_classifier_transferability(
+    #     dm,
+    #     sampling_strategy='fixed_model',
+    #     fixed_axis='model',
+    #     fixed_value=example_model,
+    #     verbose=True
+    # )
+    # 
+    # if not transferability_results.empty:
+    #     transferability_results.to_csv(f'transferability_{example_model}_fixed.csv', index=False)
+    #     analysis = analyze_transferability_results(
+    #         transferability_results,
+    #         save_path=f'transferability_{example_model}'
+    #     )
+
+    # Example 3: Fix dataset, test on different models
+    # ------------------------------------------------
+    # print("\n📌 Example 3: Fix dataset, test on different models")
+    # example_dataset = 'TOFU'
+    # 
+    # transferability_results = test_classifier_transferability(
+    #     dm,
+    #     sampling_strategy='fixed_dataset',
+    #     fixed_axis='dataset',
+    #     fixed_value=example_dataset,
+    #     verbose=True
+    # )
+    # 
+    # if not transferability_results.empty:
+    #     transferability_results.to_csv(f'transferability_{example_dataset}_fixed.csv', index=False)
+    #     analysis = analyze_transferability_results(
+    #         transferability_results,
+    #         save_path=f'transferability_{example_dataset}'
+    #     )
+
+    # Example 4: Only test cross-transfer (different model AND dataset)
+    # -----------------------------------------------------------------
+    # print("\n🔀 Example 4: Test only cross-transfer (different model AND dataset)")
+    # transferability_results = test_classifier_transferability(
+    #     dm,
+    #     sampling_strategy='cross_only',
+    #     verbose=True
+    # )
+    # 
+    # if not transferability_results.empty:
+    #     transferability_results.to_csv('transferability_cross_only.csv', index=False)
+    #     analysis = analyze_transferability_results(
+    #         transferability_results,
+    #         save_path='transferability_cross'
+    #     )
+
+    # Example 5: Test ALL combinations (WARNING: can take very long!)
+    # ---------------------------------------------------------------
+    # print("\n⚠️  Example 5: Test ALL combinations (USE WITH CAUTION!)")
+    # # Only use this if you have few classifiers or lots of time
+    # transferability_results = test_classifier_transferability(
+    #     dm,
+    #     sampling_strategy='all',
+    #     verbose=True
+    # )
+    # 
+    # if not transferability_results.empty:
+    #     transferability_results.to_csv('transferability_all.csv', index=False)
+    #     analysis = analyze_transferability_results(
+    #         transferability_results,
+    #         save_path='transferability_all'
+    #     )
+
+print("="*80 + "\n")
+
+
 wandb.finish()
 
 print("finished all tasks!")
-
 
