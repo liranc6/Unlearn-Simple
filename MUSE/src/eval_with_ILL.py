@@ -404,7 +404,7 @@ def plot_multiclass_roc_curves(results, norm_retain_tensor, norm_holdout_tensor,
         
         fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
         roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
-        
+        clf.predict_proba(X_test)[:, 1]
         plt.figure(figsize=(10, 8))
         plt.plot(fpr["micro"], tpr["micro"], label=f'Micro-average ROC (AUC = {roc_auc["micro"]:.2f})', color='deeppink', linestyle=':', linewidth=4)
         
@@ -432,13 +432,14 @@ def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forge
         'forget_vs_all': {'positive': norm_forget_tensor, 'negative': torch.cat([norm_retain_tensor, norm_holdout_tensor])}
     }
     
+    trained_classifiers = {}
     for name, data in comparisons.items():
         X = torch.cat([data['positive'], data['negative']]).numpy()
         y = torch.cat([torch.ones(len(data['positive'])), torch.zeros(len(data['negative']))]).numpy()
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
         
         binary_results[name] = {}
-        trained_classifiers = {}
+        tmp_trained_classifiers = {}
         for clf_type, (clf_class, params) in [('logistic', (LogisticRegression, {'random_state': 42, 'max_iter': 300})), ('random_forest', (RandomForestClassifier, {'random_state': 42, 'n_estimators': 100}))]:
             clf = clf_class(**params).fit(X_train, y_train)
             y_pred, y_proba = clf.predict(X_test), clf.predict_proba(X_test)[:, 1]
@@ -458,7 +459,9 @@ def train_binary_comparisons(norm_retain_tensor, norm_holdout_tensor, norm_forge
             plt.savefig(roc_path, bbox_inches='tight', dpi=150)
             plt.show()
 
-            trained_classifiers[clf_type] = clf
+            tmp_trained_classifiers[clf_type] = clf
+    
+        trained_classifiers[name] = tmp_trained_classifiers
 
     return binary_results, binary_feature_importance, trained_classifiers
 
