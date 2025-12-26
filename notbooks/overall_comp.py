@@ -63,9 +63,9 @@ parser.add_argument('--n_repeats', type=int, default=3, help='Number of repetiti
 parser.add_argument('--max_prompt_tokens', type=int, default=300, help='Maximum tokens for input prompt truncation')
 parser.add_argument('--max_gen_tokens', type=int, default=300, help='Maximum tokens to generate as output')
 parser.add_argument('--timestamp', type=str, default=None, help='Timestamp for the experiment run')
-parser.add_argument('--new_classifiers', type=str, default=False, help='Use new classifiers for evaluation')
-parser.add_argument('--transferability', default=True, action='store_true', help='Enable transferability experiments')
-parser.add_argument('--save_classifiers', default=True, action='store_true', help='Save trained classifiers for future use')
+parser.add_argument('--new_classifiers', default=False, action='store_true', help='Use new classifiers for evaluation')
+parser.add_argument('--transferability', default=False, action='store_true', help='Enable transferability experiments')
+parser.add_argument('--save_classifiers', default=False, action='store_true', help='Save trained classifiers for future use')
 
 args, unknown = parser.parse_known_args()
 
@@ -87,6 +87,10 @@ N_REPEATS = args.n_repeats
 NEW_CLASSIFIERS = args.new_classifiers
 TRANSFERABILITY = args.transferability
 SAVE_CLASSIFIERS = args.save_classifiers
+
+if TRANSFERABILITY:
+    SAVE_CLASSIFIERS = True
+    print(f"TRANSFERABILITY enabled, setting SAVE_CLASSIFIERS to True.")
 
 # Setup directories
 curr_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
@@ -127,7 +131,7 @@ if DEBUG:
     TIMESTAMP = '2025-09-17_18-58'
 else:
     RESULTS_DIR = os.path.join(Unlearn_Simple_DIR, 'results', f'subset_{SUBSET_SIZE}')
-    TIMESTAMP = args.timestamp if args.timestamp is not None else datetime.now().strftime('%Y-%m-%d_%H-%M')
+    TIMESTAMP = args.timestamp if args.timestamp is not None else datetime.now().strftime('%Y_%m_%d-%H_%M_%S')
 
 EXPERIMENT_NAME = f'top_k_{NEIGHBOR_DIST}_k_neighbors_{MAX_NEIGHBORS}_n_tokens_{N_TOKENS}_MNT_{MAX_PROMPT_TOKENS}_test_size_{TEST_SIZE}_reph_{REPHRASED_ORIGINAL}'
 
@@ -1136,7 +1140,7 @@ def run_ill_evaluation(model_name, benchmark_name, model, tokenizer, datasets, n
         'tokenizer': tokenizer,
         'datasets': datasets,
         'prompt_column': ['question', 'answer'],
-        'create_new_neighbors_file': False,
+        'create_new_neighbors_file': True,
         'showplts': False,
         'plots_output_dir': None,
         'strategy': strategy,
