@@ -2736,9 +2736,9 @@ def run_comprehensive_experiments(max_models_per_family=3, subset_size=25, force
     # Run evaluations
     for i, (model_name, benchmark_name) in enumerate(model_benchmark_mapping.items(), 1):
         
-         # Debug mode: limit to first 3 evaluations
-        if DEBUG and i >= 3:
-            print("Debug mode: stopping after 3 evaluations")
+         # Debug mode: limit to first 2 evaluations
+        if DEBUG and i >= 2:
+            print("Debug mode: stopping after 2 evaluations")
             break
         print(f"   Model: {model_name}")
         print(f"   Benchmark: {benchmark_name}")
@@ -2792,155 +2792,6 @@ def run_comprehensive_experiments(max_models_per_family=3, subset_size=25, force
     return all_results
 
 
-def analyze_results_and_generate_tables(all_results):
-    """
-    Process all_results to generate formatted analysis tables.
-    
-    Args:
-        all_results: List of evaluation results from experiments
-        
-    Returns:
-        dict: Dictionary containing table2, table3, table4, detailed_results, and summary_stats
-    """
-    
-    print(f"\n� Processing {len(all_results)} experimental results...\n")
-    
-    # Generate the comprehensive detailed results
-    detailed_df = create_comprehensive_detailed_results(all_results)
-    
-    # Clean the data: Convert 'N/A' strings and any concatenations (e.g., 'N/AN/A') to np.nan for numeric operations
-    numeric_columns = ['AUC', 'Accuracy', 'F1', 'Retain_vs_All', 'Forget_vs_All', 'Holdout_vs_All', 'Multi_class', 'AUC_at_1_FP']
-    for col in numeric_columns:
-        if col in detailed_df.columns:
-            # Replace any string containing 'N/A' (including concatenations like 'N/AN/A') with np.nan
-            detailed_df[col] = detailed_df[col].astype(str).replace(r'.*N/A.*', np.nan, regex=True)
-            # Convert to numeric, coercing errors to NaN
-            detailed_df[col] = pd.to_numeric(detailed_df[col], errors='coerce')
-    
-    # Rename columns for consistency
-    column_mapping = {
-        'Multi_class_AUC': 'AUC',
-        'Evaluation_Method': 'Method',
-        'Retain_vs_All_AUC': 'Retain_vs_All',
-        'Forget_vs_All_AUC': 'Forget_vs_All',
-        'Holdout_vs_All_AUC': 'Holdout_vs_All',
-        'Multi_class_AUC': 'Multi_class'
-    }
-    detailed_df = detailed_df.rename(columns=column_mapping)
-    
-    # Calculate REMIND_OURS average results for Table 2
-    epp_ue_results = detailed_df[detailed_df['Method'] == 'REMIND_OURS'].groupby('Classifier').agg({
-        'AUC': 'mean',
-        'Accuracy': 'mean', 
-        'F1': 'mean',
-        'Retain_vs_All': 'mean',
-        'Forget_vs_All': 'mean',
-        'Holdout_vs_All': 'mean',
-        'Multi_class': 'mean',
-        'AUC_at_1_FP': 'mean'
-    }).round(3)
-    
-    # Table 2: Aggregate Method Comparison
-    print("📊 Generating Table 2: Aggregate Method Comparison...\n")
-    baseline_keys = ['retain_vs_all_auc', 'forget_vs_all_auc', 'holdout_vs_all_auc', 'multi_class_auc', 'retain_vs_all_auc_at_1_fp', 'forget_vs_all_auc_at_1_fp', 'holdout_vs_all_auc_at_1_fp']
-    # Use baseline_keys to construct table2_data dynamically, using np.nan if not returned
-    table2_data = {
-        'Method': ['Zlib Compression', 'MIN-K%', 'MIN-K%++', 'ROUGE-L F1', 'REMIND_OURS - LogReg (ours)', 'REMIND_OURS - Tree (ours)'],
-        'Retain_vs_All_AUC': [
-            zlib_avg.get('Retain_vs_All', np.nan),
-            min_k_avg.get('Retain_vs_All', np.nan),
-            min_k_pp_avg.get('Retain_vs_All', np.nan),
-            rouge_avg.get('Retain_vs_All', np.nan),
-            epp_ue_results.loc['LogReg', 'Retain_vs_All'],
-            epp_ue_results.loc['Tree', 'Retain_vs_All']
-        ],
-        'Forget_vs_All_AUC': [
-            zlib_avg.get('Forget_vs_All', np.nan),
-            min_k_avg.get('Forget_vs_All', np.nan),
-            min_k_pp_avg.get('Forget_vs_All', np.nan),
-            rouge_avg.get('Forget_vs_All', np.nan),
-            epp_ue_results.loc['LogReg', 'Forget_vs_All'],
-            epp_ue_results.loc['Tree', 'Forget_vs_All']
-        ],
-        'Holdout_vs_All_AUC': [
-            zlib_avg.get('Holdout_vs_All', np.nan),
-            min_k_avg.get('Holdout_vs_All', np.nan),
-            min_k_pp_avg.get('Holdout_vs_All', np.nan),
-            rouge_avg.get('Holdout_vs_All', np.nan),
-            epp_ue_results.loc['LogReg', 'Holdout_vs_All'],
-            epp_ue_results.loc['Tree', 'Holdout_vs_All']
-        ],
-        'Multi_class_AUC': [
-            zlib_avg.get('AUC', np.nan),
-            min_k_avg.get('AUC', np.nan),
-            min_k_pp_avg.get('AUC', np.nan),
-            rouge_avg.get('AUC', np.nan),
-            epp_ue_results.loc['LogReg', 'AUC'],
-            epp_ue_results.loc['Tree', 'AUC']
-        ],
-        'AUC_at_1_FP': [
-            zlib_avg.get('AUC_at_1_FP', np.nan),
-            min_k_avg.get('AUC_at_1_FP', np.nan),
-            min_k_pp_avg.get('AUC_at_1_FP', np.nan),
-            rouge_avg.get('AUC_at_1_FP', np.nan),
-            epp_ue_results.loc['LogReg', 'AUC_at_1_FP'],
-            epp_ue_results.loc['Tree', 'AUC_at_1_FP']
-        ]
-    }
-    table2_df = pd.DataFrame(table2_data)
-
-    # Table 3: Model Family Comparison
-    print("📊 Generating Table 3: Model Family Comparison...\n")
-    def get_model_family(model_name):
-        if 'llama-3' in model_name.lower():
-            return 'LLaMA-3-8B'
-        elif 'llama-2' in model_name.lower():
-            return 'LLaMA-2-7B'
-        elif 'zephyr' in model_name.lower():
-            return 'Zephyr-7B'
-        else:
-            return 'Other'
-
-    detailed_df['Model_Family'] = detailed_df['Model'].apply(get_model_family)
-    
-    # Filter out baseline methods with 'N/A' classifier for family analysis
-    family_df = detailed_df[detailed_df['Classifier'] != 'N/A'].copy()
-    
-    # Ensure all numeric columns are properly converted
-    for col in numeric_columns:
-        if col in family_df.columns:
-            family_df[col] = pd.to_numeric(family_df[col], errors='coerce')
-    
-    family_results = family_df.groupby(['Model_Family', 'Method', 'Classifier']).agg({
-        'AUC': 'mean',
-        'Accuracy': 'mean',
-        'F1': 'mean',
-        'Retain_vs_All': 'mean',
-        'Forget_vs_All': 'mean',
-        'Holdout_vs_All': 'mean',
-        'Multi_class': 'mean',
-        'AUC_at_1_FP': 'mean'
-    }).round(3)
-
-    # Table 4: Detailed Individual Results
-    print("📊 Generating Table 4: Detailed Individual Results...\n")
-    table4_df = detailed_df.copy()
-
-    return {
-        'table2': table2_df,
-        'table3': family_results,
-        'table4': table4_df,
-        'detailed_results': detailed_df,
-        'summary_stats': {
-            'total_evaluations': len(all_results),
-            'unique_models': detailed_df['Model'].nunique(),
-            'unique_benchmarks': detailed_df['Benchmark'].nunique(),
-            'avg_auc_logreg': detailed_df[(detailed_df['Classifier']=='LogReg')]['AUC'].mean(),
-            'avg_auc_tree': detailed_df[(detailed_df['Classifier']=='Tree')]['AUC'].mean()
-        }
-    }
-
-
 def create_comprehensive_detailed_results(all_results, save_path=None):
     """
     Create a comprehensive detailed results DataFrame that includes ALL methods:
@@ -2978,6 +2829,9 @@ def create_comprehensive_detailed_results(all_results, save_path=None):
                 'Retain_vs_All_AUC': rephrasing.get('Retain vs All AUC', np.nan),
                 'Forget_vs_All_AUC': rephrasing.get('Forget vs All AUC', np.nan),
                 'Holdout_vs_All_AUC': rephrasing.get('Holdout vs All AUC', np.nan),
+                'Retain_vs_Forget_AUC': rephrasing.get('Retain_vs_Forget_AUC', np.nan),
+                'Retain_vs_Holdout_AUC': rephrasing.get('Retain_vs_Holdout_AUC', np.nan),
+                'Forget_vs_Holdout_AUC': rephrasing.get('Forget_vs_Holdout_AUC', np.nan),
                 'AUC_at_1_FP': rephrasing.get('Retain_vs_All_auc_at_1_fp', np.nan),  # Using Retain as representative
                 'Method_Category': 'Our Method'
             })
@@ -3010,6 +2864,9 @@ def create_comprehensive_detailed_results(all_results, save_path=None):
                             'Retain_vs_All_AUC': baseline_data.get('retain_vs_all_auc', 0.5),
                             'Forget_vs_All_AUC': baseline_data.get('forget_vs_all_auc', 0.5),
                             'Holdout_vs_All_AUC': baseline_data.get('holdout_vs_all_auc', 0.5),
+                            'Retain_vs_Forget_AUC': np.nan,  # Not available for baselines
+                            'Retain_vs_Holdout_AUC': np.nan,  # Not available for baselines
+                            'Forget_vs_Holdout_AUC': np.nan,  # Not available for baselines
                             'AUC_at_1_FP': baseline_data.get('retain_vs_all_auc_at_1_fp', 0.5),
                             'Method_Category': 'Baseline'
                         })
@@ -3036,7 +2893,8 @@ def create_comprehensive_detailed_results(all_results, save_path=None):
         'Model', 'Model_Family', 'Benchmark', 'Unlearning_Method', 
         'Evaluation_Method', 'Neighbor_Method', 'Classifier', 'Method_Category',
         'Multi_class_AUC', 'Retain_vs_All_AUC', 'Forget_vs_All_AUC', 
-        'Holdout_vs_All_AUC', 'AUC_at_1_FP', 'Accuracy', 'F1'
+        'Holdout_vs_All_AUC', 'Retain_vs_Forget_AUC', 'Retain_vs_Holdout_AUC', 
+        'Forget_vs_Holdout_AUC', 'AUC_at_1_FP', 'Accuracy', 'F1'
     ]
     detailed_all_df = detailed_all_df[column_order]
     
@@ -3349,7 +3207,7 @@ def analyze_results_and_generate_tables(all_results):
     detailed_df = create_comprehensive_detailed_results(all_results)
     
     # Clean the data: Convert 'N/A' strings and any concatenations (e.g., 'N/AN/A') to np.nan for numeric operations
-    numeric_columns = ['Multi_class_AUC', 'Accuracy', 'F1', 'Retain_vs_All_AUC', 'Forget_vs_All_AUC', 'Holdout_vs_All_AUC', 'AUC_at_1_FP']
+    numeric_columns = ['Multi_class_AUC', 'Accuracy', 'F1', 'Retain_vs_All_AUC', 'Forget_vs_All_AUC', 'Holdout_vs_All_AUC', 'AUC_at_1_FP', 'Retain_vs_Forget_AUC', 'Retain_vs_Holdout_AUC', 'Forget_vs_Holdout_AUC']
     for col in numeric_columns:
         if col in detailed_df.columns:
             # Replace any string containing 'N/A' (including concatenations like 'N/AN/A') with np.nan
@@ -3363,7 +3221,10 @@ def analyze_results_and_generate_tables(all_results):
         'Evaluation_Method': 'Method',
         'Retain_vs_All_AUC': 'Retain_vs_All',
         'Forget_vs_All_AUC': 'Forget_vs_All',
-        'Holdout_vs_All_AUC': 'Holdout_vs_All'
+        'Holdout_vs_All_AUC': 'Holdout_vs_All',
+        'Retain_vs_Forget_AUC': 'Retain_vs_Forget',
+        'Retain_vs_Holdout_AUC': 'Retain_vs_Holdout',
+        'Forget_vs_Holdout_AUC': 'Forget_vs_Holdout'
     }
     detailed_df = detailed_df.rename(columns=column_mapping)
     
@@ -3480,7 +3341,7 @@ def analyze_results_and_generate_tables(all_results):
     family_df = detailed_df[detailed_df['Classifier'] != 'N/A'].copy()
     
     # Ensure all numeric columns are properly converted
-    numeric_columns_renamed = ['AUC', 'Accuracy', 'F1', 'Retain_vs_All', 'Forget_vs_All', 'Holdout_vs_All', 'AUC_at_1_FP']
+    numeric_columns_renamed = ['AUC', 'Accuracy', 'F1', 'Retain_vs_All', 'Forget_vs_All', 'Holdout_vs_All', 'AUC_at_1_FP', 'Retain_vs_Forget', 'Retain_vs_Holdout', 'Forget_vs_Holdout']
     for col in numeric_columns_renamed:
         if col in family_df.columns:
             family_df[col] = pd.to_numeric(family_df[col], errors='coerce')
